@@ -111,11 +111,66 @@ struct TimelineView: View {
           )
           .frame(width: max(1, width), height: size.height)
           .offset(x: offset)
+          .overlay {
+            if project.selectedClipID == clip.id {
+              HStack {
+                trimHandle(
+                  clip: clip,
+                  edge: .leading,
+                  pixelsPerSecond: size.width / max(project.duration, 0.01)
+                )
+                Spacer()
+                trimHandle(
+                  clip: clip,
+                  edge: .trailing,
+                  pixelsPerSecond: size.width / max(project.duration, 0.01)
+                )
+              }
+              .frame(width: max(12, width), height: size.height)
+            }
+          }
           .onTapGesture {
             project.selectedClipID = clip.id
           }
+          .draggable(clip.id.uuidString)
+          .dropDestination(for: String.self) { values, _ in
+            guard let rawID = values.first, let sourceID = UUID(uuidString: rawID)
+            else { return false }
+            project.moveClip(id: sourceID, before: clip.id)
+            return true
+          }
       }
     }
+  }
+
+  private func trimHandle(
+    clip: VideoClip,
+    edge: TrimEdge,
+    pixelsPerSecond: Double
+  ) -> some View {
+    RoundedRectangle(cornerRadius: 2)
+      .fill(.blue)
+      .frame(width: 8)
+      .contentShape(Rectangle().inset(by: -4))
+      .highPriorityGesture(
+        DragGesture()
+          .onEnded { value in
+            let points =
+              edge == .leading
+              ? value.translation.width
+              : -value.translation.width
+            project.trimClip(
+              id: clip.id,
+              edge: edge,
+              by: max(0, points / max(pixelsPerSecond, 0.01))
+            )
+          }
+      )
+      .help(
+        edge == .leading
+        ? "Потяните вправо, чтобы обрезать начало"
+        : "Потяните влево, чтобы обрезать конец"
+      )
   }
 
   private func playhead(in size: CGSize) -> some View {

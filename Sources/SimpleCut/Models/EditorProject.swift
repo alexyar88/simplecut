@@ -17,10 +17,15 @@ final class EditorProject: ObservableObject {
   @Published var transcriptionModel: TranscriptionModel = .base
   @Published var transcriptionProgress: Double?
   @Published var isTranscribing = false
+  @Published private(set) var canUndo = false
+  @Published private(set) var canRedo = false
 
   let player = AVPlayer()
   private let transcriptionService = LocalTranscriptionService()
   private var waveformGenerationID = UUID()
+  private var undoStack: [ProjectFile] = []
+  private var redoStack: [ProjectFile] = []
+  private let historyLimit = 100
 
   var duration: Double {
     clips.reduce(0) { $0 + $1.duration }
@@ -32,6 +37,9 @@ final class EditorProject: ObservableObject {
   }
 
   func reset() {
+    if !clips.isEmpty || !overlays.isEmpty {
+      recordUndoCheckpoint()
+    }
     waveformGenerationID = UUID()
     player.pause()
     player.replaceCurrentItem(with: nil)
@@ -84,6 +92,7 @@ final class EditorProject: ObservableObject {
           sourceStart: 0,
           duration: assetDuration
         )
+        recordUndoCheckpoint()
         clips.append(clip)
         selectedClipID = clip.id
         try await rebuildPlayback()
@@ -122,6 +131,8 @@ final class EditorProject: ObservableObject {
   }
 
   func addText() {
+    guard duration > 0 else { return }
+    recordUndoCheckpoint()
     let start = min(playhead, duration)
     let item = OverlayItem(
       kind: .text,
@@ -134,6 +145,8 @@ final class EditorProject: ObservableObject {
   }
 
   func addImage(_ url: URL) {
+    guard duration > 0 else { return }
+    recordUndoCheckpoint()
     let start = min(playhead, duration)
     let item = OverlayItem(
       kind: .image,
@@ -160,6 +173,7 @@ final class EditorProject: ObservableObject {
           self?.status = message
           self?.transcriptionProgress = progress
         }
+        recordUndoCheckpoint()
         overlays.removeAll { $0.kind == .caption }
         let captions = drafts.map {
           OverlayItem(
@@ -197,6 +211,7 @@ final class EditorProject: ObservableObject {
     for index in clips.indices {
       let end = cursor + clips[index].duration
       if playhead > cursor + 0.04, playhead < end - 0.04 {
+        recordUndoCheckpoint()
         let local = playhead - cursor
         let original = clips[index]
         let left = VideoClip(
@@ -211,10 +226,7 @@ final class EditorProject: ObservableObject {
         )
         clips.replaceSubrange(index...index, with: [left, right])
         selectedClipID = right.id
-        Task {
-          try? await rebuildPlayback()
-          generateWaveform()
-        }
+        rebuildAfterEdit()
         return
       }
       cursor = end
@@ -225,16 +237,84 @@ final class EditorProject: ObservableObject {
     guard let selectedClipID,
       let index = clips.firstIndex(where: { $0.id == selectedClipID })
     else { return }
+    recordUndoCheckpoint()
+    let removedStart = clips.prefix(index).reduce(0) { $0 + $1.duration }
+    let removedDuration = clips[index].duration
     clips.remove(at: index)
+    rippleRemoveOverlays(
+      from: removedStart,
+      duration: removedDuration
+    )
     self.selectedClipID =
       clips.indices.contains(index)
       ? clips[index].id
       : clips.last?.id
     playhead = min(playhead, duration)
-    Task {
-      try? await rebuildPlayback()
-      generateWaveform()
+    rebuildAfterEdit()
+  }
+
+  func trimClip(id: UUID, edge: TrimEdge, by requestedAmount: Double) {
+    guard requestedAmount > 0,
+      let index = clips.firstIndex(where: { $0.id == id })
+    else { return }
+    let amount = min(requestedAmount, clips[index].duration - 0.1)
+    guard amount > 0 else { return }
+    recordUndoCheckpoint()
+    let clipStart = clips.prefix(index).reduce(0) { $0 + $1.duration }
+    switch edge {
+    case .leading:
+      clips[index].sourceStart += amount
+      clips[index].duration -= amount
+      rippleRemoveOverlays(from: clipStart, duration: amount)
+      playhead = max(clipStart, playhead - amount)
+    case .trailing:
+      clips[index].duration -= amount
+      rippleRemoveOverlays(
+        from: clipStart + clips[index].duration,
+        duration: amount
+      )
+      playhead = min(playhead, duration)
     }
+    rebuildAfterEdit()
+  }
+
+  func moveClip(id: UUID, before targetID: UUID) {
+    guard id != targetID,
+      let sourceIndex = clips.firstIndex(where: { $0.id == id }),
+      let initialTargetIndex = clips.firstIndex(where: { $0.id == targetID })
+    else { return }
+    recordUndoCheckpoint()
+    let clip = clips.remove(at: sourceIndex)
+    let targetIndex =
+      sourceIndex < initialTargetIndex
+      ? initialTargetIndex - 1
+      : initialTargetIndex
+    clips.insert(clip, at: targetIndex)
+    selectedClipID = id
+    rebuildAfterEdit()
+  }
+
+  func recordUndoCheckpoint() {
+    undoStack.append(projectFile())
+    if undoStack.count > historyLimit {
+      undoStack.removeFirst(undoStack.count - historyLimit)
+    }
+    redoStack.removeAll()
+    updateHistoryState()
+  }
+
+  func undo() {
+    guard let snapshot = undoStack.popLast() else { return }
+    redoStack.append(projectFile())
+    restore(snapshot)
+    updateHistoryState()
+  }
+
+  func redo() {
+    guard let snapshot = redoStack.popLast() else { return }
+    undoStack.append(projectFile())
+    restore(snapshot)
+    updateHistoryState()
   }
 
   func seek(to time: Double) {
@@ -282,10 +362,74 @@ final class EditorProject: ObservableObject {
     canvas = project.canvas
     clips = project.clips
     overlays = project.overlays
+    selectedClipID = clips.first?.id
+    selectedOverlayID = nil
     playhead = 0
+    undoStack.removeAll()
+    redoStack.removeAll()
+    updateHistoryState()
+    rebuildAfterEdit()
+  }
+
+  private func projectFile() -> ProjectFile {
+    ProjectFile(
+      name: name,
+      canvas: canvas,
+      clips: clips,
+      overlays: overlays
+    )
+  }
+
+  private func restore(_ project: ProjectFile) {
+    name = project.name
+    canvas = project.canvas
+    clips = project.clips
+    overlays = project.overlays
+    selectedClipID = clips.first?.id
+    selectedOverlayID = nil
+    playhead = min(playhead, duration)
+    rebuildAfterEdit()
+  }
+
+  private func updateHistoryState() {
+    canUndo = !undoStack.isEmpty
+    canRedo = !redoStack.isEmpty
+  }
+
+  private func rebuildAfterEdit() {
     Task {
-      try? await rebuildPlayback()
-      generateWaveform()
+      do {
+        try await rebuildPlayback()
+        generateWaveform()
+      } catch {
+        lastError = error.localizedDescription
+        status = "Не удалось обновить монтаж"
+      }
+    }
+  }
+
+  private func rippleRemoveOverlays(from start: Double, duration: Double) {
+    let end = start + duration
+    overlays = overlays.compactMap { item in
+      let itemEnd = item.startTime + item.duration
+      if itemEnd <= start {
+        return item
+      }
+      if item.startTime >= end {
+        var shifted = item
+        shifted.startTime -= duration
+        return shifted
+      }
+
+      let before = max(0, start - item.startTime)
+      let after = max(0, itemEnd - end)
+      guard before + after >= 0.1 else { return nil }
+      var trimmed = item
+      trimmed.duration = before + after
+      if before == 0 {
+        trimmed.startTime = start
+      }
+      return trimmed
     }
   }
 }

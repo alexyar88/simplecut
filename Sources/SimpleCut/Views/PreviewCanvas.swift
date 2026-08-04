@@ -3,6 +3,7 @@ import SwiftUI
 
 struct PreviewCanvas: View {
   @EnvironmentObject private var project: EditorProject
+  @State private var draggingOverlayID: UUID?
 
   var body: some View {
     GeometryReader { proxy in
@@ -82,6 +83,10 @@ struct PreviewCanvas: View {
               where: { $0.id == item.id }
             )
           else { return }
+          if draggingOverlayID != item.id {
+            project.recordUndoCheckpoint()
+            draggingOverlayID = item.id
+          }
           project.selectedOverlayID = item.id
           project.overlays[index].normalizedX = min(
             1,
@@ -91,6 +96,9 @@ struct PreviewCanvas: View {
             1,
             max(0, value.location.y / max(size.height, 1))
           )
+        }
+        .onEnded { _ in
+          draggingOverlayID = nil
         }
     )
   }

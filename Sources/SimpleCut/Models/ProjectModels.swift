@@ -83,6 +83,11 @@ struct ProjectFile: Codable {
   var overlays: [OverlayItem]
 }
 
+enum TrimEdge {
+  case leading
+  case trailing
+}
+
 struct CaptionDraft: Equatable, Sendable {
   var text: String
   var startTime: Double

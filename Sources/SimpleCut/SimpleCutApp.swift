@@ -12,6 +12,18 @@ struct SimpleCutApp: App {
     }
     .windowStyle(.hiddenTitleBar)
     .commands {
+      CommandGroup(replacing: .undoRedo) {
+        Button("Отменить") {
+          project.undo()
+        }
+        .keyboardShortcut("z")
+        .disabled(!project.canUndo)
+        Button("Повторить") {
+          project.redo()
+        }
+        .keyboardShortcut("z", modifiers: [.command, .shift])
+        .disabled(!project.canRedo)
+      }
       CommandGroup(replacing: .newItem) {
         Button("Новый проект") {
           project.reset()
