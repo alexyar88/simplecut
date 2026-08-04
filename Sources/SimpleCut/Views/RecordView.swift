@@ -4,6 +4,7 @@ struct RecordView: View {
   @Environment(\.dismiss) private var dismiss
   @EnvironmentObject private var project: EditorProject
   @StateObject private var recorder = RecordingService()
+  @State private var isFinalizing = false
 
   var body: some View {
     VStack(spacing: 18) {
@@ -16,10 +17,10 @@ struct RecordView: View {
         }
         Spacer()
         Button("Закрыть") { dismiss() }
-          .disabled(recorder.isRecording)
+          .disabled(recorder.isRecording || isFinalizing)
           .help(
-            recorder.isRecording
-              ? "Сначала остановите запись"
+            recorder.isRecording || isFinalizing
+              ? "Дождитесь завершения записи"
               : "Закрыть окно записи"
           )
       }
@@ -111,8 +112,16 @@ struct RecordView: View {
               recorder.cancelCountdown()
             } else {
               recorder.startRecording(countdown: 3) { url in
-                project.importVideo(url)
-                dismiss()
+                isFinalizing = true
+                project.importVideo(
+                  url,
+                  copyToLibrary: false
+                ) { success in
+                  isFinalizing = false
+                  if success {
+                    dismiss()
+                  }
+                }
               }
             }
           } label: {
@@ -131,6 +140,10 @@ struct RecordView: View {
           .controlSize(.large)
           .tint(recorder.isRecording ? .red : .accentColor)
           .disabled(recorder.cameras.isEmpty)
+          .disabled(isFinalizing)
+          if isFinalizing {
+            ProgressView("Добавляем запись…")
+          }
         }
         .frame(width: 360)
       }

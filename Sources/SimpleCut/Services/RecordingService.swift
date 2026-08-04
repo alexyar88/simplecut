@@ -217,10 +217,14 @@ final class RecordingService: NSObject, ObservableObject {
   private func beginRecording() {
     guard !movieOutput.isRecording else { return }
     applyVideoSettings()
-    let destination = FileManager.default.temporaryDirectory
-      .appendingPathComponent("SimpleCut-\(UUID().uuidString).mov")
-    movieOutput.startRecording(to: destination, recordingDelegate: self)
-    isRecording = true
+    do {
+      let destination = try MediaLibrary.recordingDestination()
+      movieOutput.startRecording(to: destination, recordingDelegate: self)
+      isRecording = true
+    } catch {
+      completion = nil
+      errorMessage = error.localizedDescription
+    }
   }
 
   func stopRecording() {

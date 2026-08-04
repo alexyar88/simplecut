@@ -85,25 +85,40 @@ final class EditorProject: ObservableObject {
     RecoveryService.clear()
   }
 
-  func importVideo(_ url: URL, securityScoped: Bool = false) {
-    guard !isBusy else { return }
+  func importVideo(
+    _ url: URL,
+    securityScoped: Bool = false,
+    copyToLibrary: Bool = true,
+    completion: @escaping (Bool) -> Void = { _ in }
+  ) {
+    guard !isBusy else {
+      completion(false)
+      return
+    }
     let isAccessing = securityScoped
       ? url.startAccessingSecurityScopedResource()
       : false
     isBusy = true
     status = "Импорт видео…"
     Task {
+      var succeeded = false
       defer {
         if isAccessing {
           url.stopAccessingSecurityScopedResource()
         }
         isBusy = false
+        completion(succeeded)
       }
       var storedURL: URL?
       do {
-        let importedURL = try await Task.detached(priority: .userInitiated) {
-          try MediaLibrary.importVideo(from: url)
-        }.value
+        let importedURL: URL
+        if copyToLibrary {
+          importedURL = try await Task.detached(priority: .userInitiated) {
+            try MediaLibrary.importVideo(from: url)
+          }.value
+        } else {
+          importedURL = url
+        }
         storedURL = importedURL
         let asset = AVURLAsset(url: importedURL)
         let assetDuration = try await asset.load(.duration).seconds
@@ -126,8 +141,9 @@ final class EditorProject: ObservableObject {
         try await rebuildPlayback()
         status = "Видео импортировано"
         generateWaveform()
+        succeeded = true
       } catch {
-        if let storedURL {
+        if let storedURL, copyToLibrary {
           try? FileManager.default.removeItem(at: storedURL)
           if clips.last?.sourceURL == storedURL {
             clips.removeLast()

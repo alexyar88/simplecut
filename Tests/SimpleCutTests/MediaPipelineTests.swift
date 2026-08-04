@@ -5,6 +5,42 @@ import XCTest
 @testable import SimpleCut
 
 final class MediaPipelineTests: XCTestCase {
+  func testRecordedVideoIsAddedWithoutSecondCopy() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("SimpleCutRecording-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let recording = directory.appendingPathComponent("recording.mov")
+    try await makeTestMovie(at: recording, duration: 1)
+    let result = await withCheckedContinuation { continuation in
+      Task { @MainActor in
+        let project = EditorProject(loadRecovery: false)
+        project.importVideo(
+          recording,
+          copyToLibrary: false
+        ) { succeeded in
+          continuation.resume(
+            returning: (
+              succeeded,
+              project.isBusy,
+              project.clips,
+              project.status
+            )
+          )
+        }
+      }
+    }
+
+    XCTAssertTrue(result.0)
+    XCTAssertFalse(result.1)
+    XCTAssertEqual(result.2.count, 1)
+    XCTAssertEqual(result.2[0].sourceURL, recording)
+    XCTAssertEqual(result.3, "Видео импортировано")
+  }
+
   func testWaveformSplitAndOverlayExport() async throws {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("SimpleCutTests-\(UUID().uuidString)")
