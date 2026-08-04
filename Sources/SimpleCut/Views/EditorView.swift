@@ -225,7 +225,7 @@ struct EditorView: View {
   private var allowedTypes: [UTType] {
     switch importer {
     case .image: [.image]
-    case .project: [.json]
+    case .project: [.simpleCutProject, .json]
     default: [.movie, .mpeg4Movie, .quickTimeMovie]
     }
   }
@@ -262,8 +262,8 @@ struct EditorView: View {
 
   private func saveProject() {
     let panel = NSSavePanel()
-    panel.allowedContentTypes = [.json]
-    panel.nameFieldStringValue = "\(project.name).simplecut.json"
+    panel.allowedContentTypes = [.simpleCutProject]
+    panel.nameFieldStringValue = "\(project.name).simplecut"
     guard panel.runModal() == .OK, let url = panel.url else { return }
     do {
       try project.saveProject(to: url)
@@ -295,4 +295,11 @@ struct EditorView: View {
       project.isBusy = false
     }
   }
+}
+
+extension UTType {
+  static let simpleCutProject = UTType(
+    exportedAs: "app.simplecut.project",
+    conformingTo: .package
+  )
 }

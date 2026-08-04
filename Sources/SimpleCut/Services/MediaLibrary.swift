@@ -2,6 +2,17 @@ import Foundation
 
 enum MediaLibrary {
   static func importVideo(from source: URL) throws -> URL {
+    try importMedia(from: source, defaultExtension: "mov")
+  }
+
+  static func importImage(from source: URL) throws -> URL {
+    try importMedia(from: source, defaultExtension: "png")
+  }
+
+  private static func importMedia(
+    from source: URL,
+    defaultExtension: String
+  ) throws -> URL {
     let fileManager = FileManager.default
     let root = try fileManager.url(
       for: .applicationSupportDirectory,
@@ -17,7 +28,7 @@ enum MediaLibrary {
     )
 
     let fileExtension = source.pathExtension.isEmpty
-      ? "mov"
+      ? defaultExtension
       : source.pathExtension
     let destination = root
       .appendingPathComponent(UUID().uuidString)

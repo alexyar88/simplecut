@@ -146,16 +146,21 @@ final class EditorProject: ObservableObject {
 
   func addImage(_ url: URL) {
     guard duration > 0 else { return }
-    recordUndoCheckpoint()
-    let start = min(playhead, duration)
-    let item = OverlayItem(
-      kind: .image,
-      startTime: start,
-      duration: max(2, min(5, duration - start)),
-      imageURL: url
-    )
-    overlays.append(item)
-    selectedOverlayID = item.id
+    do {
+      let importedURL = try MediaLibrary.importImage(from: url)
+      recordUndoCheckpoint()
+      let start = min(playhead, duration)
+      let item = OverlayItem(
+        kind: .image,
+        startTime: start,
+        duration: max(0.1, min(5, duration - start)),
+        imageURL: importedURL
+      )
+      overlays.append(item)
+      selectedOverlayID = item.id
+    } catch {
+      lastError = error.localizedDescription
+    }
   }
 
   func generateCaptions() {
@@ -344,20 +349,12 @@ final class EditorProject: ObservableObject {
   }
 
   func saveProject(to url: URL) throws {
-    let project = ProjectFile(
-      name: name,
-      canvas: canvas,
-      clips: clips,
-      overlays: overlays
-    )
-    let data = try JSONEncoder.pretty.encode(project)
-    try data.write(to: url, options: .atomic)
+    try ProjectPackageService.save(projectFile(), to: url)
     status = "Проект сохранён"
   }
 
   func loadProject(from url: URL) throws {
-    let data = try Data(contentsOf: url)
-    let project = try JSONDecoder().decode(ProjectFile.self, from: data)
+    let project = try ProjectPackageService.load(from: url)
     name = project.name
     canvas = project.canvas
     clips = project.clips

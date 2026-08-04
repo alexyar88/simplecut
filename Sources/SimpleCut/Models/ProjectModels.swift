@@ -76,7 +76,7 @@ struct OverlayItem: Identifiable, Codable, Equatable {
 }
 
 struct ProjectFile: Codable {
-  var version = 1
+  var version = ProjectPackageService.currentVersion
   var name: String
   var canvas: CanvasPreset
   var clips: [VideoClip]

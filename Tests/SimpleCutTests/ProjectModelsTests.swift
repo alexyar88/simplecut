@@ -106,4 +106,49 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: first), contents)
     XCTAssertEqual(try Data(contentsOf: second), contents)
   }
+
+  func testPortableProjectPackageCopiesAndResolvesMedia() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("SimpleCutPackage-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(
+      at: root,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = root.appendingPathComponent("source.mov")
+    let image = root.appendingPathComponent("overlay.png")
+    try Data("video".utf8).write(to: source)
+    try Data("image".utf8).write(to: image)
+    let destination = root.appendingPathComponent("Portable.simplecut")
+    let project = ProjectFile(
+      name: "Portable",
+      canvas: .horizontal,
+      clips: [
+        VideoClip(sourceURL: source, sourceStart: 0, duration: 1)
+      ],
+      overlays: [
+        OverlayItem(
+          kind: .image,
+          startTime: 0,
+          duration: 1,
+          imageURL: image
+        )
+      ]
+    )
+
+    try ProjectPackageService.save(project, to: destination)
+    let manifest = try String(
+      contentsOf: destination.appendingPathComponent("project.json"),
+      encoding: .utf8
+    )
+    XCTAssertFalse(manifest.contains(root.path))
+
+    let loaded = try ProjectPackageService.load(from: destination)
+    XCTAssertEqual(loaded.version, ProjectPackageService.currentVersion)
+    XCTAssertEqual(try Data(contentsOf: loaded.clips[0].sourceURL), Data("video".utf8))
+    XCTAssertEqual(
+      try Data(contentsOf: try XCTUnwrap(loaded.overlays[0].imageURL)),
+      Data("image".utf8)
+    )
+  }
 }
