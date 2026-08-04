@@ -26,13 +26,11 @@
 
 - macOS 14 или новее;
 - полный Xcode с совместимым macOS SDK;
-- Swift 6.
+- Swift 6.1 или новее.
 
-В текущей машине установлен только несовместимый набор Command Line Tools.
-После установки Xcode нужно выполнить:
+Для локальной сборки выполните:
 
 ```sh
-sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
 ./Scripts/package-app.sh
 open build/SimpleCut.app
 ```
@@ -64,3 +62,7 @@ SIMPLECUT_RUN_MODEL_TEST=1 swift test \
 
 Второй тест синтезирует речь средствами macOS, при необходимости скачивает
 Base-модель и проверяет настоящий локальный Core ML-инференс.
+
+Обычная сборка и тесты также запускаются в GitHub Actions для каждого push и
+pull request. Интеграционный тест Whisper намеренно не входит в CI, поскольку
+скачивает модель и требует существенно больше времени.
