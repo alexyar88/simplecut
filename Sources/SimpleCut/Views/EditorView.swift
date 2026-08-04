@@ -103,11 +103,30 @@ struct EditorView: View {
     }
     .onAppear {
       installTimeObserver()
+      if !project.clips.isEmpty, project.player.currentItem == nil {
+        Task {
+          do {
+            try await project.rebuildPlayback()
+          } catch {
+            project.lastError = error.localizedDescription
+          }
+        }
+      }
     }
     .onDisappear {
       if let timeObserver {
         project.player.removeTimeObserver(timeObserver)
       }
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .simpleCutSave)) { _ in
+      saveProject()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .simpleCutImport)) { _ in
+      importer = .video
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .simpleCutExport)) { _ in
+      guard !project.clips.isEmpty, !project.isBusy else { return }
+      showingExportSettings = true
     }
   }
 
@@ -120,6 +139,7 @@ struct EditorView: View {
       }
       .buttonStyle(.borderedProminent)
       .tint(.red)
+      .accessibilityIdentifier("record-button")
 
       Menu {
         Button {
@@ -164,10 +184,20 @@ struct EditorView: View {
       .disabled(project.selectedClipID == nil)
       .help("Удалить выбранный фрагмент")
       Spacer()
+      Text(project.name)
+        .font(.headline)
+        .lineLimit(1)
+      if project.isDirty {
+        Circle()
+          .fill(.orange)
+          .frame(width: 7, height: 7)
+          .help("Есть несохранённые изменения")
+      }
 
       Menu {
         Button("Открыть проект…") { importer = .project }
         Button("Сохранить проект…") { saveProject() }
+        Button("Сохранить как…") { saveProject(saveAs: true) }
       } label: {
         Image(systemName: "ellipsis.circle")
       }
@@ -177,6 +207,7 @@ struct EditorView: View {
       Button("Экспорт") { showingExportSettings = true }
         .buttonStyle(.borderedProminent)
         .disabled(project.clips.isEmpty || project.isBusy)
+        .accessibilityIdentifier("export-button")
     }
     .padding(.horizontal, 14)
     .frame(height: 52)
@@ -280,7 +311,15 @@ struct EditorView: View {
     }
   }
 
-  private func saveProject() {
+  private func saveProject(saveAs: Bool = false) {
+    if !saveAs, let url = project.currentProjectURL {
+      do {
+        try project.saveProject(to: url)
+      } catch {
+        project.lastError = error.localizedDescription
+      }
+      return
+    }
     let panel = NSSavePanel()
     panel.allowedContentTypes = [.simpleCutProject]
     panel.nameFieldStringValue = "\(project.name).simplecut"

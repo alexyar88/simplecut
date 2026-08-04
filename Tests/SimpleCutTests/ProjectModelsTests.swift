@@ -154,5 +154,13 @@ final class ProjectModelsTests: XCTestCase {
       try Data(contentsOf: try XCTUnwrap(loaded.overlays[0].imageURL)),
       Data("image".utf8)
     )
+
+    var updated = project
+    updated.name = "Updated"
+    try ProjectPackageService.save(updated, to: destination)
+    XCTAssertEqual(
+      try ProjectPackageService.load(from: destination).name,
+      "Updated"
+    )
   }
 }

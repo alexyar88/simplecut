@@ -44,9 +44,13 @@ struct InspectorView: View {
         Section("Звук") {
           Toggle(
             "Нормализация",
-            isOn: checkpointedBinding(
+            isOn: Binding(
               get: { project.audio.normalizeLoudness },
-              set: { project.audio.normalizeLoudness = $0 }
+              set: {
+                guard $0 != project.audio.normalizeLoudness else { return }
+                project.recordUndoCheckpoint()
+                project.audio.normalizeLoudness = $0
+              }
             )
           )
           if project.audio.normalizeLoudness {
@@ -63,9 +67,13 @@ struct InspectorView: View {
           }
           Toggle(
             "Лимитер",
-            isOn: checkpointedBinding(
+            isOn: Binding(
               get: { project.audio.limiterEnabled },
-              set: { project.audio.limiterEnabled = $0 }
+              set: {
+                guard $0 != project.audio.limiterEnabled else { return }
+                project.recordUndoCheckpoint()
+                project.audio.limiterEnabled = $0
+              }
             )
           )
           if project.audio.limiterEnabled {
@@ -214,20 +222,6 @@ struct InspectorView: View {
     if isEditing {
       project.recordUndoCheckpoint()
     }
-  }
-
-  private func checkpointedBinding<T>(
-    get: @escaping () -> T,
-    set: @escaping (T) -> Void
-  ) -> Binding<T> where T: Equatable {
-    Binding(
-      get: get,
-      set: {
-        guard $0 != get() else { return }
-        project.recordUndoCheckpoint()
-        set($0)
-      }
-    )
   }
 
   private func colorSlider(

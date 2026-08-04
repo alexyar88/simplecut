@@ -22,6 +22,8 @@ final class EditorProject: ObservableObject {
   @Published var color = ColorSettings()
   @Published private(set) var canUndo = false
   @Published private(set) var canRedo = false
+  @Published private(set) var isDirty = false
+  @Published private(set) var currentProjectURL: URL?
 
   let player = AVPlayer()
   private let transcriptionService = LocalTranscriptionService()
@@ -29,6 +31,22 @@ final class EditorProject: ObservableObject {
   private var undoStack: [ProjectFile] = []
   private var redoStack: [ProjectFile] = []
   private let historyLimit = 100
+  private var recoveryTask: Task<Void, Never>?
+
+  init(loadRecovery: Bool = true) {
+    guard loadRecovery else { return }
+    guard let recovered = try? RecoveryService.load() else { return }
+    name = recovered.name
+    canvas = recovered.canvas
+    clips = recovered.clips.filter {
+      FileManager.default.fileExists(atPath: $0.sourceURL.path)
+    }
+    overlays = recovered.overlays
+    audio = recovered.audio
+    color = recovered.color
+    isDirty = true
+    status = "Восстановлена несохранённая версия"
+  }
 
   var duration: Double {
     clips.reduce(0) { $0 + $1.duration }
@@ -61,6 +79,10 @@ final class EditorProject: ObservableObject {
     isTranscribing = false
     audio = AudioSettings()
     color = ColorSettings()
+    currentProjectURL = nil
+    isDirty = false
+    recoveryTask?.cancel()
+    RecoveryService.clear()
   }
 
   func importVideo(_ url: URL, securityScoped: Bool = false) {
@@ -305,6 +327,19 @@ final class EditorProject: ObservableObject {
     rebuildAfterEdit()
   }
 
+  func moveClip(id: UUID, by offset: Int) {
+    guard let sourceIndex = clips.firstIndex(where: { $0.id == id }) else {
+      return
+    }
+    let targetIndex = min(clips.count - 1, max(0, sourceIndex + offset))
+    guard targetIndex != sourceIndex else { return }
+    recordUndoCheckpoint()
+    let clip = clips.remove(at: sourceIndex)
+    clips.insert(clip, at: targetIndex)
+    selectedClipID = id
+    rebuildAfterEdit()
+  }
+
   func recordUndoCheckpoint() {
     undoStack.append(projectFile())
     if undoStack.count > historyLimit {
@@ -312,6 +347,7 @@ final class EditorProject: ObservableObject {
     }
     redoStack.removeAll()
     updateHistoryState()
+    markDirty()
   }
 
   func undo() {
@@ -319,6 +355,7 @@ final class EditorProject: ObservableObject {
     redoStack.append(projectFile())
     restore(snapshot)
     updateHistoryState()
+    markDirty()
   }
 
   func redo() {
@@ -326,6 +363,7 @@ final class EditorProject: ObservableObject {
     undoStack.append(projectFile())
     restore(snapshot)
     updateHistoryState()
+    markDirty()
   }
 
   func seek(to time: Double) {
@@ -356,6 +394,10 @@ final class EditorProject: ObservableObject {
 
   func saveProject(to url: URL) throws {
     try ProjectPackageService.save(projectFile(), to: url)
+    currentProjectURL = url
+    isDirty = false
+    recoveryTask?.cancel()
+    RecoveryService.clear()
     status = "Проект сохранён"
   }
 
@@ -373,6 +415,10 @@ final class EditorProject: ObservableObject {
     undoStack.removeAll()
     redoStack.removeAll()
     updateHistoryState()
+    currentProjectURL = url
+    isDirty = false
+    recoveryTask?.cancel()
+    RecoveryService.clear()
     rebuildAfterEdit()
   }
 
@@ -403,6 +449,20 @@ final class EditorProject: ObservableObject {
   private func updateHistoryState() {
     canUndo = !undoStack.isEmpty
     canRedo = !redoStack.isEmpty
+  }
+
+  private func markDirty() {
+    isDirty = true
+    recoveryTask?.cancel()
+    recoveryTask = Task { [weak self] in
+      try? await Task.sleep(for: .milliseconds(800))
+      guard !Task.isCancelled, let self else { return }
+      do {
+        try RecoveryService.save(self.projectFile())
+      } catch {
+        self.lastError = "Не удалось сохранить автовосстановление: \(error.localizedDescription)"
+      }
+    }
   }
 
   private func rebuildAfterEdit() {

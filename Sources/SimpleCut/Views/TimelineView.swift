@@ -139,6 +139,27 @@ struct TimelineView: View {
             project.moveClip(id: sourceID, before: clip.id)
             return true
           }
+          .contextMenu {
+            Button("Разрезать посередине") {
+              project.selectedClipID = clip.id
+              project.seek(to: start + clip.duration / 2)
+              project.splitAtPlayhead()
+            }
+            Divider()
+            Button("Переместить влево") {
+              project.moveClip(id: clip.id, by: -1)
+            }
+            .disabled(index == 0)
+            Button("Переместить вправо") {
+              project.moveClip(id: clip.id, by: 1)
+            }
+            .disabled(index == project.clips.count - 1)
+            Divider()
+            Button("Удалить", role: .destructive) {
+              project.selectedClipID = clip.id
+              project.deleteSelectedClip()
+            }
+          }
       }
     }
   }

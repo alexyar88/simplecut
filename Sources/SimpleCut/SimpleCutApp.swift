@@ -30,6 +30,22 @@ struct SimpleCutApp: App {
         }
         .keyboardShortcut("n")
       }
+      CommandGroup(replacing: .saveItem) {
+        Button("Сохранить") {
+          NotificationCenter.default.post(name: .simpleCutSave, object: nil)
+        }
+        .keyboardShortcut("s")
+      }
+      CommandGroup(replacing: .importExport) {
+        Button("Импортировать видео…") {
+          NotificationCenter.default.post(name: .simpleCutImport, object: nil)
+        }
+        .keyboardShortcut("i")
+        Button("Экспортировать…") {
+          NotificationCenter.default.post(name: .simpleCutExport, object: nil)
+        }
+        .keyboardShortcut("e")
+      }
       CommandMenu("Монтаж") {
         Button("Разрезать") {
           project.splitAtPlayhead()
@@ -42,4 +58,10 @@ struct SimpleCutApp: App {
       }
     }
   }
+}
+
+extension Notification.Name {
+  static let simpleCutSave = Notification.Name("SimpleCut.save")
+  static let simpleCutImport = Notification.Name("SimpleCut.import")
+  static let simpleCutExport = Notification.Name("SimpleCut.export")
 }

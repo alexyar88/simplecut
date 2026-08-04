@@ -19,6 +19,9 @@ for resource_bundle in "$binary_directory"/*.bundle(N); do
   rm -rf "$application_directory/Contents/Resources/$bundle_name"
   cp -R "$resource_bundle" "$application_directory/Contents/Resources/$bundle_name"
 done
-codesign --force --deep --sign - "$application_directory"
+codesign --force --deep --sign - \
+  --entitlements "Resources/SimpleCut.entitlements" \
+  "$application_directory"
+codesign --verify --deep --strict "$application_directory"
 
 echo "$application_directory"

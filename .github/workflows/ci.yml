@@ -14,6 +14,8 @@ jobs:
         run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
       - name: Resolve dependencies
         run: swift package resolve
+      - name: Validate app metadata
+        run: plutil -lint Resources/Info.plist Resources/SimpleCut.entitlements
       - name: Build
         run: swift build
       - name: Test
