@@ -16,7 +16,13 @@ struct RecordView: View {
             .foregroundStyle(.red)
         }
         Spacer()
-        Button("Закрыть") { dismiss() }
+        Button("Закрыть") {
+          isFinalizing = true
+          Task {
+            await recorder.stopPreviewAndWait()
+            dismiss()
+          }
+        }
           .disabled(recorder.isRecording || isFinalizing)
           .help(
             recorder.isRecording || isFinalizing
@@ -117,9 +123,14 @@ struct RecordView: View {
                   url,
                   copyToLibrary: false
                 ) { success in
-                  isFinalizing = false
                   if success {
-                    dismiss()
+                    Task {
+                      await recorder.stopPreviewAndWait()
+                      isFinalizing = false
+                      dismiss()
+                    }
+                  } else {
+                    isFinalizing = false
                   }
                 }
               }
@@ -168,6 +179,7 @@ struct RecordView: View {
     .onDisappear {
       recorder.stopPreview()
     }
+    .interactiveDismissDisabled(recorder.isRecording || isFinalizing)
     .alert(
       "Ошибка записи",
       isPresented: Binding(

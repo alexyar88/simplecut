@@ -80,6 +80,9 @@ final class RecordingService: NSObject, ObservableObject {
 
   let session = AVCaptureSession()
   private let movieOutput = AVCaptureMovieFileOutput()
+  private let sessionQueue = DispatchQueue(
+    label: "app.simplecut.capture-session"
+  )
   private var completion: ((URL) -> Void)?
   private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
   private var countdownTask: Task<Void, Never>?
@@ -150,17 +153,34 @@ final class RecordingService: NSObject, ObservableObject {
     }
     configureSession()
     let captureSession = session
-    Task.detached(priority: .userInitiated) {
-      captureSession.startRunning()
+    await withCheckedContinuation { continuation in
+      sessionQueue.async {
+        if !captureSession.isRunning {
+          captureSession.startRunning()
+        }
+        continuation.resume()
+      }
     }
   }
 
   func stopPreview() {
+    Task {
+      await stopPreviewAndWait()
+    }
+  }
+
+  func stopPreviewAndWait() async {
     cancelCountdown()
     guard !isRecording else { return }
     let captureSession = session
-    Task.detached(priority: .utility) {
-      captureSession.stopRunning()
+    guard captureSession.isRunning else { return }
+    await withCheckedContinuation { continuation in
+      sessionQueue.async {
+        if captureSession.isRunning {
+          captureSession.stopRunning()
+        }
+        continuation.resume()
+      }
     }
   }
 
@@ -302,6 +322,13 @@ struct CameraPreview: NSViewRepresentable {
   func updateNSView(_ nsView: CapturePreviewView, context: Context) {
     nsView.previewLayer.session = session
     nsView.apply(device: device, rotation: rotation, isMirrored: isMirrored)
+  }
+
+  static func dismantleNSView(
+    _ nsView: CapturePreviewView,
+    coordinator: ()
+  ) {
+    nsView.previewLayer.session = nil
   }
 }
 
