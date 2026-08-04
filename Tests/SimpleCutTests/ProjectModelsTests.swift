@@ -35,7 +35,9 @@ final class ProjectModelsTests: XCTestCase {
       name: "Тест",
       canvas: .vertical,
       clips: [clip],
-      overlays: [overlay]
+      overlays: [overlay],
+      audio: AudioSettings(normalizeLoudness: true),
+      color: .automatic
     )
 
     let data = try JSONEncoder().encode(source)
@@ -45,6 +47,8 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertEqual(decoded.canvas, source.canvas)
     XCTAssertEqual(decoded.clips, source.clips)
     XCTAssertEqual(decoded.overlays, source.overlays)
+    XCTAssertEqual(decoded.audio, source.audio)
+    XCTAssertEqual(decoded.color, source.color)
   }
 
   func testCaptionGeneratorSplitsLongTextAndKeepsTiming() {

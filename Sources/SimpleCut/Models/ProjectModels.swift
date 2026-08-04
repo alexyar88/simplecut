@@ -34,6 +34,36 @@ struct VideoClip: Identifiable, Codable, Equatable {
   var sourceEnd: Double { sourceStart + duration }
 }
 
+struct AudioSettings: Codable, Equatable {
+  var normalizeLoudness = false
+  var targetLUFS = -14.0
+  var limiterEnabled = true
+  var peakCeilingDB = -1.0
+  var masterGainDB = 0.0
+}
+
+struct ColorSettings: Codable, Equatable {
+  var brightness = 0.0
+  var contrast = 1.0
+  var saturation = 1.0
+  var warmth = 0.0
+
+  var isNeutral: Bool {
+    abs(brightness) < 0.0001
+      && abs(contrast - 1) < 0.0001
+      && abs(saturation - 1) < 0.0001
+      && abs(warmth) < 0.0001
+  }
+
+  static let neutral = ColorSettings()
+  static let automatic = ColorSettings(
+    brightness: 0.035,
+    contrast: 1.08,
+    saturation: 1.06,
+    warmth: 0.08
+  )
+}
+
 enum OverlayKind: String, Codable {
   case text
   case image
@@ -81,6 +111,45 @@ struct ProjectFile: Codable {
   var canvas: CanvasPreset
   var clips: [VideoClip]
   var overlays: [OverlayItem]
+  var audio = AudioSettings()
+  var color = ColorSettings()
+
+  enum CodingKeys: String, CodingKey {
+    case version, name, canvas, clips, overlays, audio, color
+  }
+
+  init(
+    version: Int = ProjectPackageService.currentVersion,
+    name: String,
+    canvas: CanvasPreset,
+    clips: [VideoClip],
+    overlays: [OverlayItem],
+    audio: AudioSettings = AudioSettings(),
+    color: ColorSettings = ColorSettings()
+  ) {
+    self.version = version
+    self.name = name
+    self.canvas = canvas
+    self.clips = clips
+    self.overlays = overlays
+    self.audio = audio
+    self.color = color
+  }
+
+  init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    version = try values.decodeIfPresent(Int.self, forKey: .version) ?? 1
+    name = try values.decode(String.self, forKey: .name)
+    canvas = try values.decode(CanvasPreset.self, forKey: .canvas)
+    clips = try values.decode([VideoClip].self, forKey: .clips)
+    overlays = try values.decode([OverlayItem].self, forKey: .overlays)
+    audio =
+      try values.decodeIfPresent(AudioSettings.self, forKey: .audio)
+      ?? AudioSettings()
+    color =
+      try values.decodeIfPresent(ColorSettings.self, forKey: .color)
+      ?? ColorSettings()
+  }
 }
 
 enum TrimEdge {

@@ -48,6 +48,7 @@ final class MediaPipelineTests: XCTestCase {
       clips: clips,
       overlays: [overlay],
       canvas: .horizontal,
+      color: .automatic,
       to: output
     )
 
@@ -68,6 +69,58 @@ final class MediaPipelineTests: XCTestCase {
     XCTAssertEqual(exportedDuration, 1.65, accuracy: 0.1)
     XCTAssertEqual(exportedVideoTracks.count, 1)
     XCTAssertEqual(exportedAudioTracks.count, 1)
+  }
+
+  func testAudioNormalizationAndPeakLimiter() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("SimpleCutAudio-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let source = directory.appendingPathComponent("source.mov")
+    try await makeTestMovie(at: source, duration: 1)
+    let settings = AudioSettings(
+      normalizeLoudness: true,
+      targetLUFS: -18,
+      limiterEnabled: true,
+      peakCeilingDB: -6,
+      masterGainDB: 0
+    )
+    let result = try await AudioProcessingService.process(
+      clips: [
+        VideoClip(sourceURL: source, sourceStart: 0, duration: 1)
+      ],
+      settings: settings
+    )
+    let processed = try XCTUnwrap(result)
+    defer { try? FileManager.default.removeItem(at: processed.url) }
+
+    XCTAssertTrue(processed.measurement.estimatedLUFS.isFinite)
+    XCTAssertLessThanOrEqual(
+      processed.appliedGainDB + processed.measurement.peakDBFS,
+      settings.peakCeilingDB + 0.01
+    )
+    let file = try AVAudioFile(forReading: processed.url)
+    let format = file.processingFormat
+    let buffer = try XCTUnwrap(
+      AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_192)
+    )
+    var peak: Float = 0
+    while file.framePosition < file.length {
+      try file.read(into: buffer)
+      let channels = try XCTUnwrap(buffer.floatChannelData)
+      for channel in 0..<Int(format.channelCount) {
+        for frame in 0..<Int(buffer.frameLength) {
+          peak = max(peak, abs(channels[channel][frame]))
+        }
+      }
+    }
+    XCTAssertLessThanOrEqual(
+      peak,
+      Float(pow(10, settings.peakCeilingDB / 20)) + 0.01
+    )
   }
 
   @MainActor

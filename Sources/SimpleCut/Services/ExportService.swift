@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import AppKit
+import CoreImage
 import QuartzCore
 
 enum ExportService {
@@ -7,17 +8,30 @@ enum ExportService {
     clips: [VideoClip],
     overlays: [OverlayItem],
     canvas: CanvasPreset,
+    audio: AudioSettings = AudioSettings(),
+    color: ColorSettings = ColorSettings(),
     to destination: URL
   ) async throws {
+    let processedAudio = try await AudioProcessingService.process(
+      clips: clips,
+      settings: audio
+    )
+    defer {
+      if let processedAudio {
+        try? FileManager.default.removeItem(at: processedAudio.url)
+      }
+    }
     let built = try await CompositionBuilder.build(
       clips: clips,
-      canvas: canvas
+      canvas: canvas,
+      replacementAudioURL: processedAudio?.url
     )
     let videoComposition = built.videoComposition
     applyOverlays(
       overlays,
       canvas: canvas,
       duration: clips.reduce(0) { $0 + $1.duration },
+      color: color,
       to: videoComposition
     )
 
@@ -42,6 +56,7 @@ enum ExportService {
     _ overlays: [OverlayItem],
     canvas: CanvasPreset,
     duration: Double,
+    color: ColorSettings,
     to videoComposition: AVMutableVideoComposition
   ) {
     let parent = CALayer()
@@ -49,6 +64,22 @@ enum ExportService {
     let frame = CGRect(origin: .zero, size: canvas.size)
     parent.frame = frame
     video.frame = frame
+    if !color.isNeutral {
+      let controls = CIFilter(name: "CIColorControls")
+      controls?.setValue(color.brightness, forKey: kCIInputBrightnessKey)
+      controls?.setValue(color.contrast, forKey: kCIInputContrastKey)
+      controls?.setValue(color.saturation, forKey: kCIInputSaturationKey)
+      let temperature = CIFilter(name: "CITemperatureAndTint")
+      temperature?.setValue(
+        CIVector(x: 6_500, y: 0),
+        forKey: "inputNeutral"
+      )
+      temperature?.setValue(
+        CIVector(x: 6_500 + color.warmth * 1_500, y: 0),
+        forKey: "inputTargetNeutral"
+      )
+      video.filters = [controls, temperature].compactMap { $0 }
+    }
     parent.addSublayer(video)
 
     for item in overlays {

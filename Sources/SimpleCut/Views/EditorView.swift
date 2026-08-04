@@ -285,6 +285,8 @@ struct EditorView: View {
           clips: project.clips,
           overlays: project.overlays,
           canvas: project.canvas,
+          audio: project.audio,
+          color: project.color,
           to: url
         )
         project.status = "Экспорт завершён"

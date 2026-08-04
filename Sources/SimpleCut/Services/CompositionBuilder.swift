@@ -9,7 +9,8 @@ struct BuiltComposition {
 enum CompositionBuilder {
   static func build(
     clips: [VideoClip],
-    canvas: CanvasPreset
+    canvas: CanvasPreset,
+    replacementAudioURL: URL? = nil
   ) async throws -> BuiltComposition {
     let composition = AVMutableComposition()
     guard
@@ -46,7 +47,9 @@ enum CompositionBuilder {
         at: insertionTime
       )
 
-      if let audioTrack = try await asset.loadTracks(withMediaType: .audio).first {
+      if replacementAudioURL == nil,
+        let audioTrack = try await asset.loadTracks(withMediaType: .audio).first
+      {
         try? compositionAudio?.insertTimeRange(
           sourceRange,
           of: audioTrack,
@@ -98,6 +101,28 @@ enum CompositionBuilder {
       instruction.layerInstructions = [layer]
       instructions.append(instruction)
       insertionTime = insertionTime + sourceRange.duration
+    }
+
+    if let replacementAudioURL {
+      let replacementAsset = AVURLAsset(url: replacementAudioURL)
+      guard
+        let replacementTrack = try await replacementAsset
+          .loadTracks(withMediaType: .audio).first
+      else {
+        throw EditorError.exportFailed
+      }
+      let replacementDuration = CMTimeMinimum(
+        insertionTime,
+        try await replacementAsset.load(.duration)
+      )
+      try compositionAudio?.insertTimeRange(
+        CMTimeRange(
+          start: .zero,
+          duration: replacementDuration
+        ),
+        of: replacementTrack,
+        at: .zero
+      )
     }
 
     videoComposition.instructions = instructions

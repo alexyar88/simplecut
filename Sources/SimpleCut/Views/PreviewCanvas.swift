@@ -10,6 +10,16 @@ struct PreviewCanvas: View {
       ZStack {
         Color.black
         PlayerView(player: project.player)
+          .brightness(project.color.brightness)
+          .contrast(project.color.contrast)
+          .saturation(project.color.saturation)
+          .colorMultiply(
+            Color(
+              red: 1,
+              green: 1 - max(0, project.color.warmth) * 0.06,
+              blue: 1 - max(0, project.color.warmth) * 0.12
+            )
+          )
 
         ForEach(project.overlays) { item in
           if project.playhead >= item.startTime,

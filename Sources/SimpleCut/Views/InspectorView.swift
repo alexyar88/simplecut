@@ -41,6 +41,89 @@ struct InspectorView: View {
         }
       }
       if !project.clips.isEmpty {
+        Section("Звук") {
+          Toggle(
+            "Нормализация",
+            isOn: checkpointedBinding(
+              get: { project.audio.normalizeLoudness },
+              set: { project.audio.normalizeLoudness = $0 }
+            )
+          )
+          if project.audio.normalizeLoudness {
+            LabeledContent(
+              "Цель",
+              value: "\(Int(project.audio.targetLUFS)) LUFS"
+            )
+            Slider(
+              value: $project.audio.targetLUFS,
+              in: -24 ... -9,
+              step: 1,
+              onEditingChanged: checkpointAtStart
+            )
+          }
+          Toggle(
+            "Лимитер",
+            isOn: checkpointedBinding(
+              get: { project.audio.limiterEnabled },
+              set: { project.audio.limiterEnabled = $0 }
+            )
+          )
+          if project.audio.limiterEnabled {
+            LabeledContent(
+              "Потолок",
+              value: String(format: "%.1f dB", project.audio.peakCeilingDB)
+            )
+            Slider(
+              value: $project.audio.peakCeilingDB,
+              in: -3 ... -0.1,
+              onEditingChanged: checkpointAtStart
+            )
+          }
+          LabeledContent(
+            "Усиление",
+            value: String(format: "%+.1f dB", project.audio.masterGainDB)
+          )
+          Slider(
+            value: $project.audio.masterGainDB,
+            in: -12 ... 12,
+            onEditingChanged: checkpointAtStart
+          )
+        }
+
+        Section("Цвет") {
+          colorSlider(
+            "Яркость",
+            value: $project.color.brightness,
+            range: -0.25 ... 0.25
+          )
+          colorSlider(
+            "Контраст",
+            value: $project.color.contrast,
+            range: 0.5 ... 1.5
+          )
+          colorSlider(
+            "Насыщенность",
+            value: $project.color.saturation,
+            range: 0 ... 2
+          )
+          colorSlider(
+            "Теплота",
+            value: $project.color.warmth,
+            range: -1 ... 1
+          )
+          HStack {
+            Button("Авто") {
+              project.recordUndoCheckpoint()
+              project.color = .automatic
+            }
+            Button("Сбросить") {
+              project.recordUndoCheckpoint()
+              project.color = .neutral
+            }
+            .disabled(project.color.isNeutral)
+          }
+        }
+
         Section("Автосубтитры") {
           Picker("Модель речи", selection: $project.transcriptionModel) {
             ForEach(TranscriptionModel.allCases) { model in
@@ -130,6 +213,34 @@ struct InspectorView: View {
   private func checkpointAtStart(_ isEditing: Bool) {
     if isEditing {
       project.recordUndoCheckpoint()
+    }
+  }
+
+  private func checkpointedBinding<T>(
+    get: @escaping () -> T,
+    set: @escaping (T) -> Void
+  ) -> Binding<T> where T: Equatable {
+    Binding(
+      get: get,
+      set: {
+        guard $0 != get() else { return }
+        project.recordUndoCheckpoint()
+        set($0)
+      }
+    )
+  }
+
+  private func colorSlider(
+    _ title: String,
+    value: Binding<Double>,
+    range: ClosedRange<Double>
+  ) -> some View {
+    Slider(
+      value: value,
+      in: range,
+      onEditingChanged: checkpointAtStart
+    ) {
+      Text(title)
     }
   }
 

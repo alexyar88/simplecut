@@ -17,6 +17,8 @@ final class EditorProject: ObservableObject {
   @Published var transcriptionModel: TranscriptionModel = .base
   @Published var transcriptionProgress: Double?
   @Published var isTranscribing = false
+  @Published var audio = AudioSettings()
+  @Published var color = ColorSettings()
   @Published private(set) var canUndo = false
   @Published private(set) var canRedo = false
 
@@ -55,6 +57,8 @@ final class EditorProject: ObservableObject {
     lastError = nil
     transcriptionProgress = nil
     isTranscribing = false
+    audio = AudioSettings()
+    color = ColorSettings()
   }
 
   func importVideo(_ url: URL, securityScoped: Bool = false) {
@@ -359,6 +363,8 @@ final class EditorProject: ObservableObject {
     canvas = project.canvas
     clips = project.clips
     overlays = project.overlays
+    audio = project.audio
+    color = project.color
     selectedClipID = clips.first?.id
     selectedOverlayID = nil
     playhead = 0
@@ -373,7 +379,9 @@ final class EditorProject: ObservableObject {
       name: name,
       canvas: canvas,
       clips: clips,
-      overlays: overlays
+      overlays: overlays,
+      audio: audio,
+      color: color
     )
   }
 
@@ -382,6 +390,8 @@ final class EditorProject: ObservableObject {
     canvas = project.canvas
     clips = project.clips
     overlays = project.overlays
+    audio = project.audio
+    color = project.color
     selectedClipID = clips.first?.id
     selectedOverlayID = nil
     playhead = min(playhead, duration)
