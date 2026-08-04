@@ -64,6 +64,59 @@ struct ColorSettings: Codable, Equatable {
   )
 }
 
+enum ExportQuality: String, CaseIterable, Identifiable {
+  case compatible
+  case efficient
+  case compact
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .compatible: "H.264 · совместимый"
+    case .efficient: "HEVC · высокое качество"
+    case .compact: "H.264 · компактный"
+    }
+  }
+}
+
+enum ExportResolution: String, CaseIterable, Identifiable {
+  case small
+  case hd
+  case fourK
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .small: "720p"
+    case .hd: "1080p"
+    case .fourK: "2160p"
+    }
+  }
+
+  var scale: Double {
+    switch self {
+    case .small: 2.0 / 3.0
+    case .hd: 1
+    case .fourK: 2
+    }
+  }
+}
+
+struct ExportSettings: Equatable {
+  var quality: ExportQuality = .compatible
+  var resolution: ExportResolution = .hd
+  var framesPerSecond = 30
+
+  func outputSize(for canvas: CanvasPreset) -> CGSize {
+    CGSize(
+      width: (canvas.size.width * resolution.scale).rounded(),
+      height: (canvas.size.height * resolution.scale).rounded()
+    )
+  }
+}
+
 enum OverlayKind: String, Codable {
   case text
   case image

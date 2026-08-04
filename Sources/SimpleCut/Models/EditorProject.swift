@@ -16,6 +16,7 @@ final class EditorProject: ObservableObject {
   @Published var lastError: String?
   @Published var transcriptionModel: TranscriptionModel = .base
   @Published var transcriptionProgress: Double?
+  @Published var exportProgress: Double?
   @Published var isTranscribing = false
   @Published var audio = AudioSettings()
   @Published var color = ColorSettings()
@@ -56,6 +57,7 @@ final class EditorProject: ObservableObject {
     status = "Добавьте видео, чтобы начать"
     lastError = nil
     transcriptionProgress = nil
+    exportProgress = nil
     isTranscribing = false
     audio = AudioSettings()
     color = ColorSettings()

@@ -7,6 +7,9 @@ struct EditorView: View {
   @State private var importer: Importer?
   @State private var timeObserver: Any?
   @State private var showingRecorder = false
+  @State private var showingExportSettings = false
+  @State private var exportSettings = ExportSettings()
+  @State private var exportTask: Task<Void, Never>?
 
   private enum Importer: Identifiable {
     case video
@@ -44,13 +47,18 @@ struct EditorView: View {
     .overlay {
       if project.isBusy {
         VStack(spacing: 10) {
-          if let progress = project.transcriptionProgress {
+          if let progress = project.exportProgress ?? project.transcriptionProgress {
             ProgressView(value: progress)
               .frame(width: 240)
           } else {
             ProgressView()
           }
           Text(project.status)
+          if exportTask != nil {
+            Button("Отменить экспорт") {
+              exportTask?.cancel()
+            }
+          }
         }
         .padding(20)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
@@ -80,6 +88,18 @@ struct EditorView: View {
     .sheet(isPresented: $showingRecorder) {
       RecordView()
         .environmentObject(project)
+    }
+    .sheet(isPresented: $showingExportSettings) {
+      ExportSettingsView(
+        settings: $exportSettings,
+        onExport: {
+          showingExportSettings = false
+          exportVideo(settings: exportSettings)
+        },
+        onCancel: {
+          showingExportSettings = false
+        }
+      )
     }
     .onAppear {
       installTimeObserver()
@@ -154,7 +174,7 @@ struct EditorView: View {
       .menuStyle(.borderlessButton)
       .help("Проект")
 
-      Button("Экспорт") { exportVideo() }
+      Button("Экспорт") { showingExportSettings = true }
         .buttonStyle(.borderedProminent)
         .disabled(project.clips.isEmpty || project.isBusy)
     }
@@ -272,14 +292,23 @@ struct EditorView: View {
     }
   }
 
-  private func exportVideo() {
+  private func exportVideo(settings: ExportSettings) {
     let panel = NSSavePanel()
     panel.allowedContentTypes = [.mpeg4Movie]
     panel.nameFieldStringValue = "\(project.name).mp4"
     guard panel.runModal() == .OK, let url = panel.url else { return }
+    let staging = url.deletingLastPathComponent()
+      .appendingPathComponent(".SimpleCutExport-\(UUID().uuidString).mp4")
     project.isBusy = true
+    project.exportProgress = 0
     project.status = "Экспорт видео…"
-    Task {
+    exportTask = Task {
+      defer {
+        try? FileManager.default.removeItem(at: staging)
+        project.isBusy = false
+        project.exportProgress = nil
+        exportTask = nil
+      }
       do {
         try await ExportService.export(
           clips: project.clips,
@@ -287,14 +316,25 @@ struct EditorView: View {
           canvas: project.canvas,
           audio: project.audio,
           color: project.color,
-          to: url
+          settings: settings,
+          progress: { project.exportProgress = $0 },
+          to: staging
         )
+        if FileManager.default.fileExists(atPath: url.path) {
+          _ = try FileManager.default.replaceItemAt(
+            url,
+            withItemAt: staging
+          )
+        } else {
+          try FileManager.default.moveItem(at: staging, to: url)
+        }
         project.status = "Экспорт завершён"
+      } catch is CancellationError {
+        project.status = "Экспорт отменён"
       } catch {
         project.lastError = error.localizedDescription
         project.status = "Ошибка экспорта"
       }
-      project.isBusy = false
     }
   }
 }

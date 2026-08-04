@@ -10,6 +10,7 @@ enum CompositionBuilder {
   static func build(
     clips: [VideoClip],
     canvas: CanvasPreset,
+    outputSize: CGSize? = nil,
     replacementAudioURL: URL? = nil
   ) async throws -> BuiltComposition {
     let composition = AVMutableComposition()
@@ -27,7 +28,8 @@ enum CompositionBuilder {
     )
 
     let videoComposition = AVMutableVideoComposition()
-    videoComposition.renderSize = canvas.size
+    let renderSize = outputSize ?? canvas.size
+    videoComposition.renderSize = renderSize
     videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
     var instructions: [AVVideoCompositionInstructionProtocol] = []
     var insertionTime = CMTime.zero
@@ -64,16 +66,16 @@ enum CompositionBuilder {
         .standardized
       let orientedSize = displayRect.size
       let scale = min(
-        canvas.size.width / max(orientedSize.width, 1),
-        canvas.size.height / max(orientedSize.height, 1)
+        renderSize.width / max(orientedSize.width, 1),
+        renderSize.height / max(orientedSize.height, 1)
       )
       let fittedSize = CGSize(
         width: orientedSize.width * scale,
         height: orientedSize.height * scale
       )
       let offset = CGPoint(
-        x: (canvas.size.width - fittedSize.width) / 2,
-        y: (canvas.size.height - fittedSize.height) / 2
+        x: (renderSize.width - fittedSize.width) / 2,
+        y: (renderSize.height - fittedSize.height) / 2
       )
       var transform = preferredTransform
       transform = transform.concatenating(

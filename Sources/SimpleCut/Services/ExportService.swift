@@ -10,8 +10,16 @@ enum ExportService {
     canvas: CanvasPreset,
     audio: AudioSettings = AudioSettings(),
     color: ColorSettings = ColorSettings(),
+    settings: ExportSettings = ExportSettings(),
+    progress: @MainActor @escaping (Double) -> Void = { _ in },
     to destination: URL
   ) async throws {
+    try validateDestination(
+      destination,
+      duration: clips.reduce(0) { $0 + $1.duration },
+      settings: settings
+    )
+    await progress(0.02)
     let processedAudio = try await AudioProcessingService.process(
       clips: clips,
       settings: audio
@@ -21,15 +29,22 @@ enum ExportService {
         try? FileManager.default.removeItem(at: processedAudio.url)
       }
     }
+    await progress(0.18)
+    let outputSize = settings.outputSize(for: canvas)
     let built = try await CompositionBuilder.build(
       clips: clips,
       canvas: canvas,
+      outputSize: outputSize,
       replacementAudioURL: processedAudio?.url
     )
     let videoComposition = built.videoComposition
+    videoComposition.frameDuration = CMTime(
+      value: 1,
+      timescale: CMTimeScale(settings.framesPerSecond)
+    )
     applyOverlays(
       overlays,
-      canvas: canvas,
+      canvasSize: outputSize,
       duration: clips.reduce(0) { $0 + $1.duration },
       color: color,
       to: videoComposition
@@ -38,7 +53,7 @@ enum ExportService {
     guard
       let session = AVAssetExportSession(
         asset: built.asset,
-        presetName: AVAssetExportPresetHighestQuality
+        presetName: presetName(for: settings.quality)
       )
     else {
       throw EditorError.exportFailed
@@ -46,22 +61,42 @@ enum ExportService {
     session.videoComposition = videoComposition
     session.outputURL = destination
     session.outputFileType = .mp4
-    await session.export()
+    let sessionBox = ExportSessionBox(session)
+    let exportTask = Task {
+      await sessionBox.session.export()
+    }
+    do {
+      while true {
+        try Task.checkCancellation()
+        let status = sessionBox.session.status
+        if status == .completed || status == .failed || status == .cancelled {
+          break
+        }
+        await progress(0.2 + Double(sessionBox.session.progress) * 0.8)
+        try await Task.sleep(for: .milliseconds(100))
+      }
+      await exportTask.value
+    } catch {
+      sessionBox.session.cancelExport()
+      exportTask.cancel()
+      throw error
+    }
     guard session.status == .completed else {
       throw session.error ?? EditorError.exportFailed
     }
+    await progress(1)
   }
 
   private static func applyOverlays(
     _ overlays: [OverlayItem],
-    canvas: CanvasPreset,
+    canvasSize: CGSize,
     duration: Double,
     color: ColorSettings,
     to videoComposition: AVMutableVideoComposition
   ) {
     let parent = CALayer()
     let video = CALayer()
-    let frame = CGRect(origin: .zero, size: canvas.size)
+    let frame = CGRect(origin: .zero, size: canvasSize)
     parent.frame = frame
     video.frame = frame
     if !color.isNeutral {
@@ -89,7 +124,7 @@ enum ExportService {
         let text = CATextLayer()
         text.string = item.text ?? ""
         text.alignmentMode = .center
-        text.fontSize = item.fontSize
+        text.fontSize = item.fontSize * canvasSize.width / 1_080
         text.foregroundColor = NSColor(hex: item.foregroundHex).cgColor
         text.backgroundColor = NSColor(hex: item.backgroundHex).cgColor
         text.cornerRadius = 14
@@ -103,15 +138,18 @@ enum ExportService {
         layer = imageLayer
       }
 
-      let width = canvas.size.width * item.normalizedWidth
+      let width = canvasSize.width * item.normalizedWidth
       let height =
         item.kind.isTextual
-        ? max(item.fontSize * 1.8, 90)
+        ? max(
+          item.fontSize * canvasSize.width / 1_080 * 1.8,
+          90 * canvasSize.width / 1_080
+        )
         : width
       layer.bounds = CGRect(x: 0, y: 0, width: width, height: height)
       layer.position = CGPoint(
-        x: canvas.size.width * item.normalizedX,
-        y: canvas.size.height * (1 - item.normalizedY)
+        x: canvasSize.width * item.normalizedX,
+        y: canvasSize.height * (1 - item.normalizedY)
       )
       layer.opacity = Float(item.opacity)
       layer.setAffineTransform(
@@ -144,6 +182,57 @@ enum ExportService {
       postProcessingAsVideoLayer: video,
       in: parent
     )
+  }
+
+  private static func presetName(for quality: ExportQuality) -> String {
+    switch quality {
+    case .compatible:
+      AVAssetExportPresetHighestQuality
+    case .efficient:
+      AVAssetExportPresetHEVCHighestQuality
+    case .compact:
+      AVAssetExportPresetMediumQuality
+    }
+  }
+
+  private static func validateDestination(
+    _ destination: URL,
+    duration: Double,
+    settings: ExportSettings
+  ) throws {
+    let values = try destination.deletingLastPathComponent()
+      .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+    guard let available = values.volumeAvailableCapacityForImportantUsage else {
+      return
+    }
+    let pixels = settings.outputSize(for: .horizontal).width
+      * settings.outputSize(for: .horizontal).height
+    let estimatedBitrate =
+      pixels * Double(settings.framesPerSecond)
+      * (settings.quality == .compact ? 0.035 : 0.08)
+    let estimatedBytes = Int64(max(20_000_000, duration * estimatedBitrate / 8))
+    guard available > estimatedBytes * 2 else {
+      throw ExportError.insufficientDiskSpace
+    }
+  }
+}
+
+private final class ExportSessionBox: @unchecked Sendable {
+  let session: AVAssetExportSession
+
+  init(_ session: AVAssetExportSession) {
+    self.session = session
+  }
+}
+
+enum ExportError: LocalizedError {
+  case insufficientDiskSpace
+
+  var errorDescription: String? {
+    switch self {
+    case .insufficientDiskSpace:
+      "Недостаточно свободного места для экспорта"
+    }
   }
 }
 
