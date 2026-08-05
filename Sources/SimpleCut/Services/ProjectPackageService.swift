@@ -8,8 +8,7 @@ enum ProjectPackageService {
 
   static func save(_ source: ProjectFile, to destination: URL) throws {
     let fileManager = FileManager.default
-    let parent = destination.deletingLastPathComponent()
-    let temporary = parent
+    let temporary = fileManager.temporaryDirectory
       .appendingPathComponent(".simplecut-\(UUID().uuidString)", isDirectory: true)
     let mediaDirectory = temporary.appendingPathComponent(
       "Media",

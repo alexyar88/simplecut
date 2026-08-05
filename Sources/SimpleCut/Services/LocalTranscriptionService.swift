@@ -9,8 +9,10 @@ final class LocalTranscriptionService {
   func transcribe(
     clips: [VideoClip],
     model: TranscriptionModel,
-    onStatus: @escaping @MainActor (String, Double?) -> Void
+    language: TranscriptionLanguage,
+    onStatus: @escaping @MainActor @Sendable (String, Double?) -> Void
   ) async throws -> [CaptionDraft] {
+    try Task.checkCancellation()
     onStatus("Подготавливаем звуковую дорожку…", nil)
     let audioURL = try await AudioRenderService.render(clips: clips)
     defer { try? FileManager.default.removeItem(at: audioURL) }
@@ -18,10 +20,12 @@ final class LocalTranscriptionService {
     if whisperKit == nil || loadedModel != model {
       onStatus("Скачиваем модель \(model.title)…", 0)
       let modelDirectory = try modelsDirectory()
-      let modelFolder = try await WhisperKit.download(
-        variant: model.rawValue,
-        downloadBase: modelDirectory
+      let modelFolder = try await TranscriptionModelDownloader.download(
+        model: model,
+        directory: modelDirectory,
+        onStatus: onStatus
       )
+      try Task.checkCancellation()
       onStatus("Загружаем модель в память…", nil)
       let config = WhisperKitConfig(
         model: model.rawValue,
@@ -35,12 +39,14 @@ final class LocalTranscriptionService {
       loadedModel = model
     }
 
+    try Task.checkCancellation()
     guard let whisperKit else {
       throw EditorError.transcriptionFailed
     }
     onStatus("Распознаём речь на устройстве…", nil)
     let options = DecodingOptions(
-      detectLanguage: true,
+      language: language.whisperCode,
+      detectLanguage: language == .automatic,
       wordTimestamps: true,
       chunkingStrategy: .vad
     )
@@ -49,6 +55,7 @@ final class LocalTranscriptionService {
       decodeOptions: options,
       callback: nil
     )
+    try Task.checkCancellation()
 
     let words = results.flatMap(\.segments).flatMap { segment in
       (segment.words ?? []).map {
@@ -85,5 +92,24 @@ final class LocalTranscriptionService {
       withIntermediateDirectories: true
     )
     return directory
+  }
+}
+
+private enum TranscriptionModelDownloader {
+  nonisolated static func download(
+    model: TranscriptionModel,
+    directory: URL,
+    onStatus: @escaping @MainActor @Sendable (String, Double?) -> Void
+  ) async throws -> URL {
+    try await WhisperKit.download(
+      variant: model.rawValue,
+      downloadBase: directory,
+      progressCallback: { progress in
+        let fraction = progress.fractionCompleted
+        Task { @MainActor in
+          onStatus("Скачиваем модель \(model.title)…", fraction)
+        }
+      }
+    )
   }
 }

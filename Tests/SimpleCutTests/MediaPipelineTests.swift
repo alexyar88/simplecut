@@ -192,7 +192,8 @@ final class MediaPipelineTests: XCTestCase {
           duration: duration
         )
       ],
-      model: .base
+      model: .base,
+      language: .automatic
     ) { _, _ in }
 
     XCTAssertFalse(captions.isEmpty)

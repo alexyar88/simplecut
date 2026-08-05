@@ -7,9 +7,10 @@ struct PreviewCanvas: View {
 
   var body: some View {
     GeometryReader { proxy in
+      let canvasSize = fittedCanvasSize(in: proxy.size)
       ZStack {
         Color.black
-        PlayerView(player: project.player)
+        PlayerView(player: project.player, scalingMode: project.scalingMode)
           .brightness(project.color.brightness)
           .contrast(project.color.contrast)
           .saturation(project.color.saturation)
@@ -25,15 +26,13 @@ struct PreviewCanvas: View {
           if project.playhead >= item.startTime,
             project.playhead <= item.startTime + item.duration
           {
-            overlay(item, in: proxy.size)
+            overlay(item, in: canvasSize)
           }
         }
       }
-      .aspectRatio(
-        project.canvas.size.width / project.canvas.size.height,
-        contentMode: .fit
-      )
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .frame(width: canvasSize.width, height: canvasSize.height)
+      .coordinateSpace(name: "previewCanvas")
+      .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
       .clipped()
     }
   }
@@ -86,7 +85,7 @@ struct PreviewCanvas: View {
       project.selectedOverlayID = item.id
     }
     .gesture(
-      DragGesture()
+      DragGesture(coordinateSpace: .named("previewCanvas"))
         .onChanged { value in
           guard
             let index = project.overlays.firstIndex(
@@ -110,6 +109,18 @@ struct PreviewCanvas: View {
         .onEnded { _ in
           draggingOverlayID = nil
         }
+    )
+  }
+
+  private func fittedCanvasSize(in container: CGSize) -> CGSize {
+    let canvas = project.canvas.size
+    let scale = min(
+      container.width / max(canvas.width, 1),
+      container.height / max(canvas.height, 1)
+    )
+    return CGSize(
+      width: max(1, canvas.width * scale),
+      height: max(1, canvas.height * scale)
     )
   }
 }

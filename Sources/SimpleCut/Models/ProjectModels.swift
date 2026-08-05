@@ -25,11 +25,25 @@ enum CanvasPreset: String, Codable, CaseIterable, Identifiable {
   }
 }
 
+enum VideoScalingMode: String, Codable, CaseIterable, Identifiable {
+  case fit
+  case fill
+
+  var id: String { rawValue }
+  var title: String {
+    switch self {
+    case .fit: "Вписать целиком"
+    case .fill: "Заполнить с обрезкой"
+    }
+  }
+}
+
 struct VideoClip: Identifiable, Codable, Equatable {
   var id = UUID()
   var sourceURL: URL
   var sourceStart: Double
   var duration: Double
+  var sourceDuration: Double? = nil
 
   var sourceEnd: Double { sourceStart + duration }
 }
@@ -78,6 +92,22 @@ enum ExportQuality: String, CaseIterable, Identifiable {
     case .compact: "H.264 · компактный"
     }
   }
+
+  var detail: String {
+    switch self {
+    case .compatible: "Лучший выбор для отправки и публикации."
+    case .efficient: "Меньше размер при высоком качестве; совместимость ниже."
+    case .compact: "Самый небольшой файл с умеренным качеством."
+    }
+  }
+
+  var estimatedMegabitsPerSecond: Double {
+    switch self {
+    case .compatible: 12
+    case .efficient: 8
+    case .compact: 5
+    }
+  }
 }
 
 enum ExportResolution: String, CaseIterable, Identifiable {
@@ -115,6 +145,18 @@ struct ExportSettings: Equatable {
       height: (canvas.size.height * resolution.scale).rounded()
     )
   }
+
+  func estimatedFileSize(duration: Double) -> String {
+    let resolutionFactor = pow(resolution.scale, 2)
+    let frameRateFactor = Double(framesPerSecond) / 30
+    let megabytes =
+      quality.estimatedMegabitsPerSecond * resolutionFactor * frameRateFactor
+      * max(0, duration) / 8
+    if megabytes >= 1024 {
+      return String(format: "≈ %.1f ГБ", megabytes / 1024)
+    }
+    return String(format: "≈ %.0f МБ", max(1, megabytes))
+  }
 }
 
 enum OverlayKind: String, Codable {
@@ -127,7 +169,7 @@ enum OverlayKind: String, Codable {
   }
 }
 
-enum TranscriptionModel: String, CaseIterable, Identifiable {
+enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
   case base
   case accurate = "large-v3-v20240930_626MB"
 
@@ -137,6 +179,37 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
     switch self {
     case .base: "Быстро · Base"
     case .accurate: "Точно · Large v3"
+    }
+  }
+
+  var downloadHint: String {
+    switch self {
+    case .base: "Около 150 МБ при первом запуске"
+    case .accurate: "Около 626 МБ при первом запуске"
+    }
+  }
+}
+
+enum TranscriptionLanguage: String, CaseIterable, Identifiable, Sendable {
+  case automatic
+  case russian
+  case english
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .automatic: "Авто"
+    case .russian: "Русский"
+    case .english: "Английский"
+    }
+  }
+
+  var whisperCode: String? {
+    switch self {
+    case .automatic: nil
+    case .russian: "ru"
+    case .english: "en"
     }
   }
 }
@@ -162,19 +235,21 @@ struct ProjectFile: Codable {
   var version = ProjectPackageService.currentVersion
   var name: String
   var canvas: CanvasPreset
+  var scalingMode = VideoScalingMode.fit
   var clips: [VideoClip]
   var overlays: [OverlayItem]
   var audio = AudioSettings()
   var color = ColorSettings()
 
   enum CodingKeys: String, CodingKey {
-    case version, name, canvas, clips, overlays, audio, color
+    case version, name, canvas, scalingMode, clips, overlays, audio, color
   }
 
   init(
     version: Int = ProjectPackageService.currentVersion,
     name: String,
     canvas: CanvasPreset,
+    scalingMode: VideoScalingMode = .fit,
     clips: [VideoClip],
     overlays: [OverlayItem],
     audio: AudioSettings = AudioSettings(),
@@ -183,6 +258,7 @@ struct ProjectFile: Codable {
     self.version = version
     self.name = name
     self.canvas = canvas
+    self.scalingMode = scalingMode
     self.clips = clips
     self.overlays = overlays
     self.audio = audio
@@ -194,6 +270,9 @@ struct ProjectFile: Codable {
     version = try values.decodeIfPresent(Int.self, forKey: .version) ?? 1
     name = try values.decode(String.self, forKey: .name)
     canvas = try values.decode(CanvasPreset.self, forKey: .canvas)
+    scalingMode =
+      try values.decodeIfPresent(VideoScalingMode.self, forKey: .scalingMode)
+      ?? .fit
     clips = try values.decode([VideoClip].self, forKey: .clips)
     overlays = try values.decode([OverlayItem].self, forKey: .overlays)
     audio =

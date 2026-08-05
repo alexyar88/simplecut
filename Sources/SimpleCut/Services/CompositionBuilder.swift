@@ -10,6 +10,7 @@ enum CompositionBuilder {
   static func build(
     clips: [VideoClip],
     canvas: CanvasPreset,
+    scalingMode: VideoScalingMode = .fit,
     outputSize: CGSize? = nil,
     replacementAudioURL: URL? = nil
   ) async throws -> BuiltComposition {
@@ -36,13 +37,26 @@ enum CompositionBuilder {
 
     for clip in clips {
       let asset = AVURLAsset(url: clip.sourceURL)
-      guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
-        continue
+      guard
+        let videoTrack = try await asset.loadTracks(withMediaType: .video).first
+      else {
+        throw EditorError.missingVideoTrack
       }
-      let sourceRange = CMTimeRange(
-        start: CMTime(seconds: clip.sourceStart, preferredTimescale: 600),
-        duration: CMTime(seconds: clip.duration, preferredTimescale: 600)
+      let assetDuration = try await asset.load(.duration)
+      let sourceStart = CMTime(
+        seconds: clip.sourceStart,
+        preferredTimescale: 600
       )
+      let requestedEnd = CMTime(
+        seconds: clip.sourceEnd,
+        preferredTimescale: 600
+      )
+      let sourceEnd = CMTimeMinimum(requestedEnd, assetDuration)
+      let sourceRange = CMTimeRange(
+        start: sourceStart,
+        end: sourceEnd
+      )
+      guard sourceRange.duration > .zero else { continue }
       try compositionVideo.insertTimeRange(
         sourceRange,
         of: videoTrack,
@@ -52,11 +66,23 @@ enum CompositionBuilder {
       if replacementAudioURL == nil,
         let audioTrack = try await asset.loadTracks(withMediaType: .audio).first
       {
-        try? compositionAudio?.insertTimeRange(
+        guard let compositionAudio else {
+          throw EditorError.exportFailed
+        }
+        let audioTrackRange = try await audioTrack.load(.timeRange)
+        let audioRange = CMTimeRangeGetIntersection(
           sourceRange,
-          of: audioTrack,
-          at: insertionTime
+          otherRange: audioTrackRange
         )
+        if !audioRange.isEmpty {
+          let audioInsertionTime =
+            insertionTime + (audioRange.start - sourceRange.start)
+          try compositionAudio.insertTimeRange(
+            audioRange,
+            of: audioTrack,
+            at: audioInsertionTime
+          )
+        }
       }
 
       let naturalSize = try await videoTrack.load(.naturalSize)
@@ -65,10 +91,12 @@ enum CompositionBuilder {
         .applying(preferredTransform)
         .standardized
       let orientedSize = displayRect.size
-      let scale = min(
-        renderSize.width / max(orientedSize.width, 1),
-        renderSize.height / max(orientedSize.height, 1)
-      )
+      let horizontalScale = renderSize.width / max(orientedSize.width, 1)
+      let verticalScale = renderSize.height / max(orientedSize.height, 1)
+      let scale =
+        scalingMode == .fill
+        ? max(horizontalScale, verticalScale)
+        : min(horizontalScale, verticalScale)
       let fittedSize = CGSize(
         width: orientedSize.width * scale,
         height: orientedSize.height * scale

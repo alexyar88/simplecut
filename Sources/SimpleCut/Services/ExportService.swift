@@ -8,6 +8,7 @@ enum ExportService {
     clips: [VideoClip],
     overlays: [OverlayItem],
     canvas: CanvasPreset,
+    scalingMode: VideoScalingMode = .fit,
     audio: AudioSettings = AudioSettings(),
     color: ColorSettings = ColorSettings(),
     settings: ExportSettings = ExportSettings(),
@@ -34,6 +35,7 @@ enum ExportService {
     let built = try await CompositionBuilder.build(
       clips: clips,
       canvas: canvas,
+      scalingMode: scalingMode,
       outputSize: outputSize,
       replacementAudioURL: processedAudio?.url
     )

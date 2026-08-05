@@ -2,6 +2,9 @@ import SwiftUI
 
 struct ExportSettingsView: View {
   @Binding var settings: ExportSettings
+  let canvas: CanvasPreset
+  let duration: Double
+  let projectName: String
   let onExport: () -> Void
   let onCancel: () -> Void
 
@@ -16,6 +19,9 @@ struct ExportSettingsView: View {
             Text(quality.title).tag(quality)
           }
         }
+        Text(settings.quality.detail)
+          .font(.caption)
+          .foregroundStyle(.secondary)
         Picker("Разрешение", selection: $settings.resolution) {
           ForEach(ExportResolution.allCases) { resolution in
             Text(resolution.title).tag(resolution)
@@ -29,16 +35,51 @@ struct ExportSettingsView: View {
       }
       .formStyle(.grouped)
 
+      GroupBox("Итоговый файл") {
+        let size = settings.outputSize(for: canvas)
+        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 7) {
+          GridRow {
+            Text("Имя")
+              .foregroundStyle(.secondary)
+            Text(suggestedFileName)
+          }
+          GridRow {
+            Text("Размер кадра")
+              .foregroundStyle(.secondary)
+            Text("\(Int(size.width)) × \(Int(size.height))")
+          }
+          GridRow {
+            Text("Длительность")
+              .foregroundStyle(.secondary)
+            Text(duration.timestamp)
+          }
+          GridRow {
+            Text("Оценка размера")
+              .foregroundStyle(.secondary)
+            Text(settings.estimatedFileSize(duration: duration))
+          }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      Text("Имя и папку назначения можно изменить на следующем шаге.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+
       HStack {
         Spacer()
         Button("Отмена", action: onCancel)
           .keyboardShortcut(.cancelAction)
-        Button("Выбрать файл…", action: onExport)
+        Button("Экспортировать…", action: onExport)
           .buttonStyle(.borderedProminent)
           .keyboardShortcut(.defaultAction)
       }
     }
     .padding(24)
-    .frame(width: 440)
+    .frame(width: 480)
+  }
+
+  private var suggestedFileName: String {
+    let trimmed = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
+    return "\(trimmed.isEmpty ? "SimpleCut" : trimmed).mp4"
   }
 }

@@ -40,6 +40,46 @@ enum CaptureRotation: String, CaseIterable, Identifiable {
     case .upsideDown: 180
     }
   }
+
+  func connectionAngle(
+    automaticAngle: CGFloat,
+    mirrored: Bool
+  ) -> CGFloat {
+    let visualAngle = angle(automaticAngle: automaticAngle)
+    guard mirrored else { return visualAngle }
+    return (360 - visualAngle).truncatingRemainder(dividingBy: 360)
+  }
+
+  var rotatedClockwise: CaptureRotation {
+    switch self {
+    case .automatic, .none: .clockwise90
+    case .clockwise90: .upsideDown
+    case .upsideDown: .counterclockwise90
+    case .counterclockwise90: .none
+    }
+  }
+
+  var rotatedCounterclockwise: CaptureRotation {
+    switch self {
+    case .automatic, .none: .counterclockwise90
+    case .counterclockwise90: .upsideDown
+    case .upsideDown: .clockwise90
+    case .clockwise90: .none
+    }
+  }
+}
+
+enum CapturePreviewMode: String, CaseIterable, Identifiable {
+  case fit
+  case fill
+
+  var id: String { rawValue }
+  var title: String {
+    switch self {
+    case .fit: "Вписать"
+    case .fill: "Заполнить"
+    }
+  }
 }
 
 @MainActor
@@ -62,6 +102,9 @@ final class RecordingService: NSObject, ObservableObject {
     }
   }
   @Published var isRecording = false
+  @Published var recordingDuration = 0.0
+  @Published var microphoneLevel = 0.0
+  @Published var previewMode: CapturePreviewMode = .fit
   @Published var countdown: Int?
   @Published var errorMessage: String?
   @Published var captureRotation: CaptureRotation = .automatic {
@@ -86,6 +129,7 @@ final class RecordingService: NSObject, ObservableObject {
   private var completion: ((URL) -> Void)?
   private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
   private var countdownTask: Task<Void, Never>?
+  private var meteringTask: Task<Void, Never>?
 
   private enum Defaults {
     static let cameraID = "recording.cameraID"
@@ -161,6 +205,7 @@ final class RecordingService: NSObject, ObservableObject {
         continuation.resume()
       }
     }
+    startMetering()
   }
 
   func stopPreview() {
@@ -172,6 +217,9 @@ final class RecordingService: NSObject, ObservableObject {
   func stopPreviewAndWait() async {
     cancelCountdown()
     guard !isRecording else { return }
+    meteringTask?.cancel()
+    meteringTask = nil
+    microphoneLevel = 0
     let captureSession = session
     guard captureSession.isRunning else { return }
     await withCheckedContinuation { continuation in
@@ -195,7 +243,10 @@ final class RecordingService: NSObject, ObservableObject {
     else { return }
     let automatic =
       rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 0
-    let angle = captureRotation.angle(automaticAngle: automatic)
+    let angle = captureRotation.connectionAngle(
+      automaticAngle: automatic,
+      mirrored: isMirrored
+    )
     if connection.isVideoRotationAngleSupported(angle) {
       connection.videoRotationAngle = angle
     }
@@ -203,6 +254,18 @@ final class RecordingService: NSObject, ObservableObject {
       connection.automaticallyAdjustsVideoMirroring = false
       connection.isVideoMirrored = isMirrored
     }
+  }
+
+  func rotateClockwise() {
+    captureRotation = captureRotation.rotatedClockwise
+  }
+
+  func rotateCounterclockwise() {
+    captureRotation = captureRotation.rotatedCounterclockwise
+  }
+
+  func toggleMirroring() {
+    isMirrored.toggle()
   }
 
   func startRecording(
@@ -241,6 +304,8 @@ final class RecordingService: NSObject, ObservableObject {
       let destination = try MediaLibrary.recordingDestination()
       movieOutput.startRecording(to: destination, recordingDelegate: self)
       isRecording = true
+      recordingDuration = 0
+      startMetering()
     } catch {
       completion = nil
       errorMessage = error.localizedDescription
@@ -249,6 +314,29 @@ final class RecordingService: NSObject, ObservableObject {
 
   func stopRecording() {
     movieOutput.stopRecording()
+  }
+
+  private func startMetering() {
+    guard meteringTask == nil else { return }
+    meteringTask = Task { [weak self] in
+      while !Task.isCancelled {
+        guard let self else { return }
+        if isRecording {
+          let seconds = CMTimeGetSeconds(movieOutput.recordedDuration)
+          recordingDuration = seconds.isFinite ? max(0, seconds) : 0
+        }
+        let decibels =
+          movieOutput.connection(with: .audio)?
+          .audioChannels.first?.averagePowerLevel ?? -60
+        let target = min(1, max(0, Double((decibels + 55) / 55)))
+        let response = target > microphoneLevel ? 0.58 : 0.22
+        microphoneLevel += (target - microphoneLevel) * response
+        if microphoneLevel < 0.002 {
+          microphoneLevel = 0
+        }
+        try? await Task.sleep(for: .milliseconds(33))
+      }
+    }
   }
 
   private func configureSession() {
@@ -311,17 +399,28 @@ struct CameraPreview: NSViewRepresentable {
   let device: AVCaptureDevice?
   let rotation: CaptureRotation
   let isMirrored: Bool
+  let mode: CapturePreviewMode
 
   func makeNSView(context: Context) -> CapturePreviewView {
     let view = CapturePreviewView()
     view.previewLayer.session = session
-    view.apply(device: device, rotation: rotation, isMirrored: isMirrored)
+    view.apply(
+      device: device,
+      rotation: rotation,
+      isMirrored: isMirrored,
+      mode: mode
+    )
     return view
   }
 
   func updateNSView(_ nsView: CapturePreviewView, context: Context) {
     nsView.previewLayer.session = session
-    nsView.apply(device: device, rotation: rotation, isMirrored: isMirrored)
+    nsView.apply(
+      device: device,
+      rotation: rotation,
+      isMirrored: isMirrored,
+      mode: mode
+    )
   }
 
   static func dismantleNSView(
@@ -352,15 +451,18 @@ final class CapturePreviewView: NSView {
 
   override func layout() {
     super.layout()
-    previewLayer.frame = bounds
+    previewLayer.bounds = bounds
+    previewLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
     updateConnection()
   }
 
   func apply(
     device: AVCaptureDevice?,
     rotation: CaptureRotation,
-    isMirrored: Bool
+    isMirrored: Bool,
+    mode: CapturePreviewMode
   ) {
+    previewLayer.videoGravity = mode == .fill ? .resizeAspectFill : .resizeAspect
     currentRotation = rotation
     currentMirroring = isMirrored
     if rotationCoordinator?.device?.uniqueID != device?.uniqueID {
@@ -375,6 +477,9 @@ final class CapturePreviewView: NSView {
   }
 
   private func updateConnection() {
+    previewLayer.setAffineTransform(
+      CGAffineTransform(scaleX: currentMirroring ? -1 : 1, y: 1)
+    )
     guard let connection = previewLayer.connection else { return }
     let automatic =
       rotationCoordinator?.videoRotationAngleForHorizonLevelPreview ?? 0
@@ -384,7 +489,7 @@ final class CapturePreviewView: NSView {
     }
     if connection.isVideoMirroringSupported {
       connection.automaticallyAdjustsVideoMirroring = false
-      connection.isVideoMirrored = currentMirroring
+      connection.isVideoMirrored = false
     }
   }
 }

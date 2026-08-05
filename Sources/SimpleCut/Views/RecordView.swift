@@ -9,27 +9,28 @@ struct RecordView: View {
   var body: some View {
     VStack(spacing: 18) {
       HStack {
-        Text("Запись")
-          .font(.title2.bold())
-        if recorder.isRecording {
-          Label("Идёт запись", systemImage: "record.circle.fill")
+        Group {
+          if recorder.isRecording {
+            Label(
+              "Идёт запись · \(recorder.recordingDuration.timestamp)",
+              systemImage: "record.circle.fill"
+            )
             .foregroundStyle(.red)
-        }
-        Spacer()
-        Button("Закрыть") {
-          isFinalizing = true
-          Task {
-            await recorder.stopPreviewAndWait()
-            dismiss()
+          } else {
+            Label("Готово к записи", systemImage: "mic.fill")
+              .foregroundStyle(.secondary)
           }
         }
-          .disabled(recorder.isRecording || isFinalizing)
-          .help(
-            recorder.isRecording || isFinalizing
-              ? "Дождитесь завершения записи"
-              : "Закрыть окно записи"
-          )
+        .frame(minWidth: 190, alignment: .leading)
+        Spacer()
+        ProgressView(value: recorder.microphoneLevel)
+          .frame(width: 110)
+          .accessibilityLabel("Уровень микрофона")
+        Text("Микрофон")
+          .font(.caption)
+          .foregroundStyle(.secondary)
       }
+      .frame(height: 22)
 
       HStack(alignment: .top, spacing: 20) {
         ZStack {
@@ -37,7 +38,8 @@ struct RecordView: View {
             session: recorder.session,
             device: recorder.selectedCamera,
             rotation: recorder.captureRotation,
-            isMirrored: recorder.isMirrored
+            isMirrored: recorder.isMirrored,
+            mode: recorder.previewMode
           )
           .background(.black)
           .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -59,55 +61,73 @@ struct RecordView: View {
         .frame(maxWidth: 520, maxHeight: 520)
         .animation(.snappy, value: recorder.countdown)
 
-        VStack(spacing: 14) {
-          Group {
-            GroupBox("Устройства") {
-              VStack(alignment: .leading, spacing: 12) {
-                Picker("Камера", selection: $recorder.selectedCameraID) {
-                  ForEach(recorder.cameras, id: \.uniqueID) { camera in
-                    Text(camera.localizedName)
-                      .tag(Optional(camera.uniqueID))
-                  }
-                }
-                Picker("Микрофон", selection: $recorder.selectedMicrophoneID) {
-                  ForEach(recorder.microphones, id: \.uniqueID) { microphone in
-                    Text(microphone.localizedName)
-                      .tag(Optional(microphone.uniqueID))
-                  }
+        VStack(alignment: .leading, spacing: 16) {
+          VStack(alignment: .leading, spacing: 12) {
+            Text("Устройства")
+              .font(.headline)
+
+            VStack(alignment: .leading, spacing: 5) {
+              Text("Камера")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+              Picker("Камера", selection: $recorder.selectedCameraID) {
+                ForEach(recorder.cameras, id: \.uniqueID) { camera in
+                  Text(camera.localizedName)
+                    .tag(Optional(camera.uniqueID))
                 }
               }
-              .padding(.vertical, 4)
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+                .accessibilityLabel("Камера")
             }
 
-            GroupBox("Изображение") {
-              VStack(alignment: .leading, spacing: 12) {
-                Text("Поворот")
-                  .font(.caption)
-                  .foregroundStyle(.secondary)
-                HStack(spacing: 8) {
-                  ForEach(CaptureRotation.allCases) { rotation in
-                    Button {
-                      recorder.captureRotation = rotation
-                    } label: {
-                      Image(systemName: rotation.systemImage)
-                        .frame(width: 26, height: 22)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(
-                      RotationButtonStyle(
-                        isSelected: recorder.captureRotation == rotation
-                      )
-                    )
-                    .help(rotation.title)
-                    .accessibilityLabel(rotation.title)
-                  }
+            VStack(alignment: .leading, spacing: 5) {
+              Text("Микрофон")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+              Picker("Микрофон", selection: $recorder.selectedMicrophoneID) {
+                ForEach(recorder.microphones, id: \.uniqueID) { microphone in
+                  Text(microphone.localizedName)
+                    .tag(Optional(microphone.uniqueID))
                 }
-                Toggle("Отразить зеркально", isOn: $recorder.isMirrored)
-                  .help("Preview и записанный файл отражаются одинаково")
               }
-              .padding(.vertical, 4)
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+                .accessibilityLabel("Микрофон")
             }
           }
+          .padding(16)
+          .background(
+            Color(nsColor: .controlBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 12)
+          )
+          .disabled(recorder.isRecording || recorder.countdown != nil)
+
+          VStack(alignment: .leading, spacing: 12) {
+            Text("Изображение")
+              .font(.headline)
+            Picker("Предпросмотр", selection: $recorder.previewMode) {
+              ForEach(CapturePreviewMode.allCases) { mode in
+                Text(mode.title).tag(mode)
+              }
+            }
+            .pickerStyle(.segmented)
+            HStack(spacing: 10) {
+              imageActionButton(
+                systemName: "rotate.right",
+                title: "Повернуть на 90°"
+              ) {
+                recorder.rotateClockwise()
+              }
+              mirrorActionButton
+            }
+          }
+          .padding(16)
+          .background(
+            Color(nsColor: .controlBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 12)
+          )
+          .frame(maxWidth: .infinity, alignment: .leading)
           .disabled(recorder.isRecording || recorder.countdown != nil)
 
           Spacer()
@@ -150,10 +170,15 @@ struct RecordView: View {
           .buttonStyle(.borderedProminent)
           .controlSize(.large)
           .tint(recorder.isRecording ? .red : .accentColor)
+          .keyboardShortcut(.space, modifiers: [])
           .disabled(recorder.cameras.isEmpty)
           .disabled(isFinalizing)
           if isFinalizing {
             ProgressView("Добавляем запись…")
+          } else {
+            Text("После остановки запись будет добавлена в конец таймлайна.")
+              .font(.caption)
+              .foregroundStyle(.secondary)
           }
         }
         .frame(width: 360)
@@ -177,9 +202,12 @@ struct RecordView: View {
       await recorder.startPreview()
     }
     .onDisappear {
-      recorder.stopPreview()
+      if recorder.isRecording {
+        recorder.stopRecording()
+      } else {
+        recorder.stopPreview()
+      }
     }
-    .interactiveDismissDisabled(recorder.isRecording || isFinalizing)
     .alert(
       "Ошибка записи",
       isPresented: Binding(
@@ -197,6 +225,35 @@ struct RecordView: View {
     if recorder.isRecording { return "Остановить запись" }
     if recorder.countdown != nil { return "Отменить" }
     return "Начать запись"
+  }
+
+  private func imageActionButton(
+    systemName: String,
+    title: String,
+    isSelected: Bool = false,
+    action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      Label(title, systemImage: systemName)
+        .lineLimit(1)
+    }
+    .buttonStyle(RotationButtonStyle(isSelected: isSelected))
+    .help(title)
+    .accessibilityLabel(title)
+  }
+
+  private var mirrorActionButton: some View {
+    Button {
+      recorder.toggleMirroring()
+    } label: {
+      Label(
+        recorder.isMirrored ? "Зеркально: вкл." : "Зеркально: выкл.",
+        systemImage: "arrow.left.and.right"
+      )
+    }
+    .buttonStyle(RotationButtonStyle(isSelected: recorder.isMirrored))
+    .help("Отразить зеркально")
+    .accessibilityLabel("Отразить зеркально")
   }
 }
 

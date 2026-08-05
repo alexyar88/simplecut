@@ -3,15 +3,20 @@ import SwiftUI
 
 struct PlayerView: NSViewRepresentable {
   let player: AVPlayer
+  let scalingMode: VideoScalingMode
 
   func makeNSView(context: Context) -> PlayerContainerView {
     let view = PlayerContainerView()
     view.playerLayer.player = player
+    view.playerLayer.videoGravity =
+      scalingMode == .fill ? .resizeAspectFill : .resizeAspect
     return view
   }
 
   func updateNSView(_ nsView: PlayerContainerView, context: Context) {
     nsView.playerLayer.player = player
+    nsView.playerLayer.videoGravity =
+      scalingMode == .fill ? .resizeAspectFill : .resizeAspect
   }
 }
 
