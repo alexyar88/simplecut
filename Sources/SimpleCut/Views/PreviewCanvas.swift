@@ -40,23 +40,22 @@ struct PreviewCanvas: View {
   @ViewBuilder
   private func overlay(_ item: OverlayItem, in size: CGSize) -> some View {
     let width = max(90, size.width * item.normalizedWidth)
+    let canvasScale = size.width / max(project.canvas.size.width, 1)
     Group {
       switch item.kind {
       case .text, .caption:
-        Text(item.text ?? "")
-          .font(
-            .system(
-              size: max(12, item.fontSize * size.width / 1080),
-              weight: .semibold)
-          )
-          .foregroundStyle(Color(nsColor: NSColor(hex: item.foregroundHex)))
-          .multilineTextAlignment(.center)
-          .padding(.horizontal, 12)
-          .padding(.vertical, 8)
-          .background(
-            Color(nsColor: NSColor(hex: item.backgroundHex)),
-            in: RoundedRectangle(cornerRadius: 8)
-          )
+        if let rendered = CaptionRenderer.render(
+          item: item,
+          canvasSize: project.canvas.size
+        ) {
+          Image(decorative: rendered.image, scale: 1)
+            .resizable()
+            .interpolation(.high)
+            .frame(
+              width: rendered.size.width * canvasScale,
+              height: rendered.size.height * canvasScale
+            )
+        }
       case .image:
         if let url = item.imageURL,
           let image = NSImage(contentsOf: url)
@@ -97,14 +96,23 @@ struct PreviewCanvas: View {
             draggingOverlayID = item.id
           }
           project.selectedOverlayID = item.id
-          project.overlays[index].normalizedX = min(
+          let normalizedX = min(
             1,
             max(0, value.location.x / max(size.width, 1))
           )
-          project.overlays[index].normalizedY = min(
+          let normalizedY = min(
             1,
             max(0, value.location.y / max(size.height, 1))
           )
+          if item.kind == .caption {
+            project.setCaptionPosition(
+              normalizedX: normalizedX,
+              normalizedY: normalizedY
+            )
+          } else {
+            project.overlays[index].normalizedX = normalizedX
+            project.overlays[index].normalizedY = normalizedY
+          }
         }
         .onEnded { _ in
           draggingOverlayID = nil
@@ -122,5 +130,25 @@ struct PreviewCanvas: View {
       width: max(1, canvas.width * scale),
       height: max(1, canvas.height * scale)
     )
+  }
+}
+
+extension CaptionFontWeight {
+  var swiftUIWeight: Font.Weight {
+    switch self {
+    case .regular: .regular
+    case .semibold: .semibold
+    case .bold: .bold
+    case .heavy: .heavy
+    }
+  }
+
+  var nsWeight: NSFont.Weight {
+    switch self {
+    case .regular: .regular
+    case .semibold: .semibold
+    case .bold: .bold
+    case .heavy: .heavy
+    }
   }
 }

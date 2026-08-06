@@ -19,6 +19,7 @@ struct SimpleCutApp: App {
         .tint(EditorTheme.accent)
     }
     .windowStyle(.hiddenTitleBar)
+    .windowResizability(.contentMinSize)
     .commands {
       SimpleCutCommands(project: project)
     }
@@ -56,30 +57,36 @@ private struct SimpleCutCommands: Commands {
         postToEditor(.simpleCutNew)
       }
       .keyboardShortcut("n")
+      .disabled(project.isBusy)
       Button("Открыть проект…") {
         postToEditor(.simpleCutOpen)
       }
       .keyboardShortcut("o")
+      .disabled(project.isBusy)
     }
     CommandGroup(replacing: .saveItem) {
       Button("Сохранить") {
         postToEditor(.simpleCutSave)
       }
       .keyboardShortcut("s")
+      .disabled(project.isBusy)
       Button("Сохранить как…") {
         postToEditor(.simpleCutSaveAs)
       }
       .keyboardShortcut("s", modifiers: [.command, .shift])
+      .disabled(project.isBusy)
     }
     CommandGroup(replacing: .importExport) {
       Button("Импортировать видео…") {
         postToEditor(.simpleCutImport)
       }
       .keyboardShortcut("i")
+      .disabled(project.isBusy)
       Button("Экспортировать…") {
         postToEditor(.simpleCutExport)
       }
       .keyboardShortcut("e")
+      .disabled(project.clips.isEmpty || project.isBusy)
     }
     CommandMenu("Монтаж") {
       Button("Выбрать все фрагменты") {

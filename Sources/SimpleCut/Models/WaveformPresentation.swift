@@ -35,14 +35,13 @@ enum WaveformPresentation {
     for waveform: [Float],
     settings: AudioSettings
   ) -> Float {
-    let manualGain = Float(pow(10, settings.masterGainDB / 20))
-    guard settings.normalizeLoudness else { return manualGain }
+    guard settings.normalizeLoudness else { return 1 }
 
     // Bucket peaks are intentionally used here instead of pretending they are
     // LUFS measurements. Bringing a representative peak close to the limiter
     // makes the preview communicate the same gain/limiting decision as export.
     let levels = waveform.map { abs($0) }.filter { $0 > 0.001 }.sorted()
-    guard !levels.isEmpty else { return manualGain }
+    guard !levels.isEmpty else { return 1 }
     let percentileIndex = min(
       levels.count - 1,
       Int(Double(levels.count - 1) * 0.78)
@@ -51,6 +50,6 @@ enum WaveformPresentation {
     let ceiling = Float(pow(10, settings.peakCeilingDB / 20))
     let target = ceiling * 0.82
     let automaticGain = min(Float(pow(10, 12.0 / 20)), target / representativePeak)
-    return manualGain * max(1, automaticGain)
+    return max(1, automaticGain)
   }
 }

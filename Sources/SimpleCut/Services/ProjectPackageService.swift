@@ -6,6 +6,11 @@ enum ProjectPackageService {
   static let manifestName = "project.json"
   private static let mediaScheme = "simplecut-media"
 
+  static func canOpen(_ url: URL) -> Bool {
+    let fileExtension = url.pathExtension.lowercased()
+    return fileExtension == packageExtension || fileExtension == "json"
+  }
+
   static func save(_ source: ProjectFile, to destination: URL) throws {
     let fileManager = FileManager.default
     let temporary = fileManager.temporaryDirectory
@@ -138,6 +143,7 @@ enum ProjectPackageError: LocalizedError {
   case invalidManifest
   case unsupportedVersion(Int)
   case missingMedia(String)
+  case unsupportedFileType
 
   var errorDescription: String? {
     switch self {
@@ -147,6 +153,8 @@ enum ProjectPackageError: LocalizedError {
       "Проект создан более новой версией SimpleCut (формат \(version))"
     case .missingMedia(let name):
       "В проекте отсутствует медиафайл: \(name)"
+    case .unsupportedFileType:
+      "Выберите проект SimpleCut (.simplecut) или совместимый JSON-файл"
     }
   }
 }

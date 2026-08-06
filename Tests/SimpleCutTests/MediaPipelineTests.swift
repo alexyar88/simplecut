@@ -74,10 +74,13 @@ final class MediaPipelineTests: XCTestCase {
       VideoClip(sourceURL: source, sourceStart: 1.1, duration: 0.9),
     ]
     let overlay = OverlayItem(
-      kind: .text,
+      kind: .caption,
       startTime: 0.2,
       duration: 1,
-      text: "SimpleCut"
+      normalizedY: 0.75,
+      text: "SimpleCut",
+      strokeHex: "#FF0000FF",
+      strokeWidth: 6
     )
     let output = directory.appendingPathComponent("export.mp4")
     try await ExportService.export(
@@ -86,6 +89,14 @@ final class MediaPipelineTests: XCTestCase {
       canvas: .horizontal,
       color: .automatic,
       to: output
+    )
+    let plainOutput = directory.appendingPathComponent("export-plain.mp4")
+    try await ExportService.export(
+      clips: clips,
+      overlays: [],
+      canvas: .horizontal,
+      color: .automatic,
+      to: plainOutput
     )
 
     XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
@@ -105,6 +116,28 @@ final class MediaPipelineTests: XCTestCase {
     XCTAssertEqual(exportedDuration, 1.65, accuracy: 0.1)
     XCTAssertEqual(exportedVideoTracks.count, 1)
     XCTAssertEqual(exportedAudioTracks.count, 1)
+    let captionFrame = try await frameBytes(at: output, time: 0.5)
+    let plainFrame = try await frameBytes(at: plainOutput, time: 0.5)
+    let pixelDifference = zip(captionFrame, plainFrame).reduce(0) {
+      $0 + abs(Int($1.0) - Int($1.1))
+    }
+    XCTAssertGreaterThan(
+      pixelDifference,
+      100_000,
+      "Экспортированный кадр должен содержать видимый текст субтитров"
+    )
+    let captionBrightPixels = brightPixelCount(in: captionFrame)
+    let plainBrightPixels = brightPixelCount(in: plainFrame)
+    XCTAssertGreaterThan(
+      captionBrightPixels,
+      plainBrightPixels + 100,
+      "В экспортированном кадре должны присутствовать светлые глифы текста"
+    )
+    XCTAssertGreaterThan(
+      redPixelCount(in: captionFrame),
+      redPixelCount(in: plainFrame) + 50,
+      "Цветная обводка текста должна попадать в экспорт"
+    )
   }
 
   func testAudioNormalizationAndPeakLimiter() async throws {
@@ -119,10 +152,18 @@ final class MediaPipelineTests: XCTestCase {
     try await makeTestMovie(at: source, duration: 1)
     let settings = AudioSettings(
       normalizeLoudness: true,
-      targetLUFS: -18,
       limiterEnabled: true,
-      peakCeilingDB: -6,
-      masterGainDB: 0
+      peakCeilingDB: -6
+    )
+    let originalResult = try await AudioProcessingService.process(
+      clips: [
+        VideoClip(sourceURL: source, sourceStart: 0, duration: 1)
+      ],
+      settings: AudioSettings(
+        normalizeLoudness: false,
+        limiterEnabled: true,
+        peakCeilingDB: -6
+      )
     )
     let result = try await AudioProcessingService.process(
       clips: [
@@ -130,33 +171,45 @@ final class MediaPipelineTests: XCTestCase {
       ],
       settings: settings
     )
+    let original = try XCTUnwrap(originalResult)
     let processed = try XCTUnwrap(result)
+    defer { try? FileManager.default.removeItem(at: original.url) }
     defer { try? FileManager.default.removeItem(at: processed.url) }
 
-    XCTAssertTrue(processed.measurement.estimatedLUFS.isFinite)
-    XCTAssertLessThanOrEqual(
-      processed.appliedGainDB + processed.measurement.peakDBFS,
-      settings.peakCeilingDB + 0.01
+    let originalLevels = try audioLevels(at: original.url)
+    let processedLevels = try audioLevels(at: processed.url)
+    XCTAssertGreaterThan(
+      processedLevels.average,
+      originalLevels.average * 1.15
     )
-    let file = try AVAudioFile(forReading: processed.url)
+    XCTAssertLessThanOrEqual(
+      processedLevels.peak,
+      Float(pow(10, settings.peakCeilingDB / 20)) + 0.01
+    )
+  }
+
+  private func audioLevels(at url: URL) throws -> (average: Float, peak: Float) {
+    let file = try AVAudioFile(forReading: url)
     let format = file.processingFormat
     let buffer = try XCTUnwrap(
       AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_192)
     )
+    var sumSquares: Float = 0
+    var sampleCount = 0
     var peak: Float = 0
     while file.framePosition < file.length {
       try file.read(into: buffer)
       let channels = try XCTUnwrap(buffer.floatChannelData)
       for channel in 0..<Int(format.channelCount) {
         for frame in 0..<Int(buffer.frameLength) {
-          peak = max(peak, abs(channels[channel][frame]))
+          let sample = channels[channel][frame]
+          peak = max(peak, abs(sample))
+          sumSquares += sample * sample
+          sampleCount += 1
         }
       }
     }
-    XCTAssertLessThanOrEqual(
-      peak,
-      Float(pow(10, settings.peakCeilingDB / 20)) + 0.01
-    )
+    return (sqrt(sumSquares / Float(max(1, sampleCount))), peak)
   }
 
   @MainActor
@@ -253,6 +306,53 @@ final class MediaPipelineTests: XCTestCase {
     await session.export()
     if session.status != .completed {
       throw session.error ?? EditorError.exportFailed
+    }
+  }
+
+  private func frameBytes(at url: URL, time: Double) async throws -> [UInt8] {
+    let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+    generator.appliesPreferredTrackTransform = true
+    generator.requestedTimeToleranceBefore = .zero
+    generator.requestedTimeToleranceAfter = .zero
+    let result = try await generator.image(
+      at: CMTime(seconds: time, preferredTimescale: 600)
+    )
+    let image = result.image
+    let width = image.width
+    let height = image.height
+    var bytes = [UInt8](repeating: 0, count: width * height * 4)
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    bytes.withUnsafeMutableBytes { buffer in
+      CGContext(
+        data: buffer.baseAddress,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: width * 4,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+      )?.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    }
+    return bytes
+  }
+
+  private func brightPixelCount(in bytes: [UInt8]) -> Int {
+    stride(from: 0, to: bytes.count, by: 4).reduce(0) { count, index in
+      let isBright =
+        bytes[index] > 225
+        && bytes[index + 1] > 225
+        && bytes[index + 2] > 225
+      return count + (isBright ? 1 : 0)
+    }
+  }
+
+  private func redPixelCount(in bytes: [UInt8]) -> Int {
+    stride(from: 0, to: bytes.count, by: 4).reduce(0) { count, index in
+      let isRed =
+        bytes[index] > 170
+        && bytes[index + 1] < 120
+        && bytes[index + 2] < 120
+      return count + (isRed ? 1 : 0)
     }
   }
 

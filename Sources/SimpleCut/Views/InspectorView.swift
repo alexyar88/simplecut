@@ -64,40 +64,72 @@ struct InspectorView: View {
           }
         }
 
-        if let index = project.selectedOverlayIndex {
-          overlaySection(index: index)
-            .id("selected-overlay")
-        }
-
-        if let index = project.selectedClipIndex {
-          clipSection(index: index)
-            .id("selected-clip")
-        } else if project.selectedClipIDs.count > 1 {
-          Section("Выбранные фрагменты") {
-            LabeledContent(
-              "Количество",
-              value: "\(project.selectedClipIDs.count)"
-            )
-            Text("Удаление и перемещение применяются ко всему выделению.")
+        if !project.clips.isEmpty {
+          Section("Автосубтитры") {
+            Picker(
+              "Язык",
+              selection: $project.transcriptionLanguage
+            ) {
+              ForEach(TranscriptionLanguage.allCases) { language in
+                Text(language.title).tag(language)
+              }
+            }
+            Picker("Модель речи", selection: $project.transcriptionModel) {
+              ForEach(TranscriptionModel.allCases) { model in
+                Text(model.title).tag(model)
+              }
+            }
+            Text(project.transcriptionModel.downloadHint)
               .font(.caption)
               .foregroundStyle(.secondary)
+            if project.isTranscribing {
+              Button("Отменить создание", role: .cancel) {
+                project.cancelTranscription()
+              }
+            } else {
+              HStack {
+                Button("Создать субтитры") {
+                  project.generateCaptions()
+                }
+                Button("Удалить субтитры", role: .destructive) {
+                  project.deleteAllCaptions()
+                }
+                .tint(.red)
+                .disabled(
+                  !project.overlays.contains(where: { $0.kind == .caption })
+                )
+              }
+              .controlSize(.small)
+              .font(.caption)
+            }
           }
-        }
 
-        if !project.clips.isEmpty {
+          if project.overlays.contains(where: { $0.kind == .caption }) {
+            captionSettingsSection
+            captionEditorSection
+          }
+
+          if let index = project.selectedOverlayIndex,
+            project.overlays[index].kind != .caption
+          {
+            overlaySection(index: index)
+              .id("selected-overlay")
+          }
+
           Section("Звук всего проекта") {
             Toggle(
               "Автонормализация звука",
               isOn: Binding(
                 get: { project.audio.normalizeLoudness },
                 set: {
-                  guard $0 != project.audio.normalizeLoudness else { return }
-                  project.recordUndoCheckpoint()
-                  project.audio = AudioSettings(normalizeLoudness: $0)
+                  project.setAudioNormalizationEnabled($0)
                 }
               )
             )
-            Text("Выравнивает громкость и защищает пики автоматически.")
+            Text(
+              "Повышает среднюю громкость, мягко сжимает динамику "
+                + "и защищает пики."
+            )
               .font(.caption)
               .foregroundStyle(.secondary)
           }
@@ -136,38 +168,9 @@ struct InspectorView: View {
             }
           }
 
-          Section("Автосубтитры") {
-            Picker(
-              "Язык",
-              selection: $project.transcriptionLanguage
-            ) {
-              ForEach(TranscriptionLanguage.allCases) { language in
-                Text(language.title).tag(language)
-              }
-            }
-            Picker("Модель речи", selection: $project.transcriptionModel) {
-              ForEach(TranscriptionModel.allCases) { model in
-                Text(model.title).tag(model)
-              }
-            }
-            Text(project.transcriptionModel.downloadHint)
-              .font(.caption)
-              .foregroundStyle(.secondary)
-            if project.isTranscribing {
-              Button("Отменить создание", role: .cancel) {
-                project.cancelTranscription()
-              }
-            } else {
-              Button {
-                project.generateCaptions()
-              } label: {
-                Label("Создать субтитры", systemImage: "captions.bubble")
-              }
-            }
-          }
         }
 
-        if project.selectedOverlayIndex == nil {
+        if project.overlays.isEmpty {
           Section("Подсказка") {
             Text("Добавьте текст или изображение и перетащите его прямо в окне просмотра.")
               .foregroundStyle(.secondary)
@@ -178,15 +181,16 @@ struct InspectorView: View {
       .scrollContentBackground(.hidden)
       .background(EditorTheme.panel)
       .onChange(of: project.selectedOverlayID) {
-        guard project.selectedOverlayID != nil else { return }
+        guard let index = project.selectedOverlayIndex else { return }
         withAnimation {
-          proxy.scrollTo("selected-overlay", anchor: .top)
-        }
-      }
-      .onChange(of: project.selectedClipID) {
-        guard project.selectedClipIndex != nil else { return }
-        withAnimation {
-          proxy.scrollTo("selected-clip", anchor: .top)
+          if project.overlays[index].kind == .caption {
+            proxy.scrollTo(
+              "caption-\(project.overlays[index].id)",
+              anchor: .center
+            )
+          } else {
+            proxy.scrollTo("selected-overlay", anchor: .top)
+          }
         }
       }
     }
@@ -194,26 +198,206 @@ struct InspectorView: View {
     .background(EditorTheme.panel)
   }
 
-  @ViewBuilder
-  private func clipSection(index: Int) -> some View {
-    let clip = project.clips[index]
-    let timelineStart = project.clips.prefix(index).reduce(0) {
-      $0 + $1.duration
-    }
-    Section("Фрагмент \(index + 1)") {
-      LabeledContent("На таймлайне", value: timelineStart.timestamp)
-      LabeledContent("Длительность", value: clip.duration.timestamp)
-      LabeledContent("Начало в исходнике", value: clip.sourceStart.timestamp)
-      LabeledContent("Файл") {
-        Text(clip.sourceURL.lastPathComponent)
-          .lineLimit(1)
-          .truncationMode(.middle)
-          .help(clip.sourceURL.path)
+  private var captionEditorSection: some View {
+    Section("Текст субтитров") {
+      ForEach(
+        project.overlays.filter { $0.kind == .caption }.map(\.id),
+        id: \.self
+      ) { id in
+        if let index = project.overlays.firstIndex(where: { $0.id == id }) {
+          captionRow(index: index)
+        }
       }
-      Text("Потяните за края выбранного фрагмента на таймлайне, чтобы обрезать его.")
-        .font(.caption)
-        .foregroundStyle(.secondary)
     }
+  }
+
+  private var captionSettingsSection: some View {
+    Section("Оформление субтитров") {
+      Menu {
+        ForEach(CaptionStylePreset.allCases) { preset in
+          Button(preset.title) {
+            project.applyCaptionPreset(preset)
+          }
+        }
+        if project.hasSavedCaptionStyle {
+          Divider()
+          Button("Мой стиль") {
+            project.applySavedCaptionStyle()
+          }
+        }
+      } label: {
+        HStack {
+          Text("Быстрый стиль")
+          Spacer()
+          Image(systemName: "chevron.down")
+            .font(.caption.bold())
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+          Color.primary.opacity(0.09),
+          in: RoundedRectangle(cornerRadius: 8)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+      }
+      .menuStyle(.button)
+      .buttonStyle(.plain)
+      Picker(
+        "Шрифт",
+        selection: captionBinding(
+          \.fontName,
+          fallback: "Helvetica Neue",
+          recordsCheckpoint: true
+        )
+      ) {
+        ForEach(
+          ["Helvetica Neue", "Arial", "Avenir Next", "Georgia", "Menlo"],
+          id: \.self
+        ) { family in
+          Text(family).tag(family)
+        }
+      }
+      Picker(
+        "Начертание",
+        selection: captionBinding(
+          \.fontWeight,
+          fallback: .semibold,
+          recordsCheckpoint: true
+        )
+      ) {
+        ForEach(CaptionFontWeight.allCases) { weight in
+          Text(weight.title).tag(weight)
+        }
+      }
+      valueSlider(
+        "Размер шрифта",
+        valueText:
+          "\(Int(captionBinding(\.fontSize, fallback: 58).wrappedValue.rounded())) pt",
+        value: captionBinding(\.fontSize, fallback: 58),
+        range: 20...160
+      )
+      ColorPicker(
+        "Цвет текста",
+        selection: captionColorBinding(\.foregroundHex),
+        supportsOpacity: true
+      )
+      ColorPicker(
+        "Цвет подложки",
+        selection: captionColorBinding(\.backgroundHex),
+        supportsOpacity: true
+      )
+      ColorPicker(
+        "Цвет обводки",
+        selection: captionColorBinding(\.strokeHex),
+        supportsOpacity: true
+      )
+      valueSlider(
+        "Толщина обводки",
+        valueText:
+          "\(Int(captionBinding(\.strokeWidth, fallback: 0).wrappedValue.rounded())) pt",
+        value: captionBinding(\.strokeWidth, fallback: 0),
+        range: 0...12
+      )
+      valueSlider(
+        "Отступы",
+        valueText:
+          "\(Int(captionBinding(\.textPadding, fallback: 12).wrappedValue.rounded())) pt",
+        value: captionBinding(\.textPadding, fallback: 12),
+        range: 0...40
+      )
+      valueSlider(
+        "Скругление",
+        valueText:
+          "\(Int(captionBinding(\.cornerRadius, fallback: 8).wrappedValue.rounded())) pt",
+        value: captionBinding(\.cornerRadius, fallback: 8),
+        range: 0...32
+      )
+      valueSlider(
+        "Ширина",
+        valueText:
+          "\(Int((captionBinding(\.normalizedWidth, fallback: 0.82).wrappedValue * 100).rounded()))%",
+        value: captionBinding(\.normalizedWidth, fallback: 0.82),
+        range: 0.25...1
+      )
+      HStack {
+        Button("Сохранить стиль") {
+          project.saveCurrentCaptionStyle()
+        }
+        .buttonStyle(.bordered)
+        Button("Удалить стиль", role: .destructive) {
+          project.deleteSavedCaptionStyle()
+        }
+        .buttonStyle(.bordered)
+        .tint(.red)
+        .disabled(!project.canDeleteCurrentCaptionStyle)
+      }
+    }
+  }
+
+  private func captionRow(index: Int) -> some View {
+    let item = project.overlays[index]
+    let isSelected = project.selectedOverlayID == item.id
+    return VStack(alignment: .leading, spacing: 2) {
+      Text(item.startTime.timestamp)
+      .font(.caption2.monospacedDigit())
+      .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+      .lineLimit(1)
+      TextField(
+        "Текст",
+        text: Binding(
+          get: {
+            project.overlays.first(where: { $0.id == item.id })?.text ?? ""
+          },
+          set: { newValue in
+            guard
+              let currentIndex = project.overlays.firstIndex(where: {
+                $0.id == item.id
+              }),
+              project.overlays[currentIndex].text != newValue
+            else { return }
+            project.recordUndoCheckpoint()
+            project.overlays[currentIndex].text = newValue
+          }
+        ),
+        axis: .vertical
+      )
+      .textFieldStyle(.plain)
+      .labelsHidden()
+      .lineLimit(1...2)
+      .simultaneousGesture(
+        TapGesture().onEnded {
+          project.selectOverlay(id: item.id, seekToStart: true)
+        }
+      )
+    }
+    .padding(.horizontal, 7)
+    .padding(.vertical, 6)
+    .background(
+      isSelected
+        ? Color.accentColor.opacity(0.12)
+        : Color(nsColor: .controlBackgroundColor).opacity(0.35),
+      in: RoundedRectangle(cornerRadius: 6)
+    )
+    .overlay {
+      if isSelected {
+        RoundedRectangle(cornerRadius: 6)
+          .stroke(Color.accentColor.opacity(0.65), lineWidth: 1)
+      }
+    }
+    .contentShape(Rectangle())
+    .onTapGesture {
+      project.selectOverlay(id: item.id, seekToStart: true)
+    }
+    .contextMenu {
+      Button("Удалить субтитр", role: .destructive) {
+        deleteCaption(id: item.id)
+      }
+    }
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel(
+      "Субтитр \(item.startTime.timestamp), \(item.text ?? "")"
+    )
+    .id("caption-\(item.id)")
   }
 
   @ViewBuilder
@@ -237,6 +421,45 @@ struct InspectorView: View {
           valueText: "\(Int(project.overlays[index].fontSize.rounded())) pt",
           value: $project.overlays[index].fontSize,
           range: 20...160
+        )
+        Picker("Шрифт", selection: $project.overlays[index].fontName) {
+          ForEach(
+            ["Helvetica Neue", "Arial", "Avenir Next", "Georgia", "Menlo"],
+            id: \.self
+          ) { family in
+            Text(family).tag(family)
+          }
+        }
+        Picker("Начертание", selection: $project.overlays[index].fontWeight) {
+          ForEach(CaptionFontWeight.allCases) { weight in
+            Text(weight.title).tag(weight)
+          }
+        }
+        ColorPicker(
+          "Цвет текста",
+          selection: colorBinding(
+            hex: $project.overlays[index].foregroundHex
+          ),
+          supportsOpacity: true
+        )
+        ColorPicker(
+          "Цвет подложки",
+          selection: colorBinding(
+            hex: $project.overlays[index].backgroundHex
+          ),
+          supportsOpacity: true
+        )
+        valueSlider(
+          "Отступы",
+          valueText: "\(Int(project.overlays[index].textPadding.rounded())) pt",
+          value: $project.overlays[index].textPadding,
+          range: 0...40
+        )
+        valueSlider(
+          "Скругление",
+          valueText: "\(Int(project.overlays[index].cornerRadius.rounded())) pt",
+          value: $project.overlays[index].cornerRadius,
+          range: 0...32
         )
       }
       LabeledContent("Начало") {
@@ -307,6 +530,76 @@ struct InspectorView: View {
     if isEditing {
       project.recordUndoCheckpoint()
     }
+  }
+
+  private func captionBinding<Value: Equatable>(
+    _ keyPath: WritableKeyPath<OverlayItem, Value>,
+    fallback: Value,
+    recordsCheckpoint: Bool = false
+  ) -> Binding<Value> {
+    Binding(
+      get: {
+        project.overlays.first(where: { $0.kind == .caption })?[
+          keyPath: keyPath
+        ] ?? fallback
+      },
+      set: { value in
+        let indices = project.overlays.indices.filter {
+          project.overlays[$0].kind == .caption
+            && project.overlays[$0][keyPath: keyPath] != value
+        }
+        guard !indices.isEmpty else { return }
+        if recordsCheckpoint {
+          project.recordUndoCheckpoint()
+        }
+        for index in indices {
+          project.overlays[index][keyPath: keyPath] = value
+        }
+      }
+    )
+  }
+
+  private func captionColorBinding(
+    _ keyPath: WritableKeyPath<OverlayItem, String>
+  ) -> Binding<Color> {
+    Binding(
+      get: {
+        let hex =
+          project.overlays.first(where: { $0.kind == .caption })?[
+            keyPath: keyPath
+          ] ?? "#FFFFFFFF"
+        return Color(nsColor: NSColor(hex: hex))
+      },
+      set: { color in
+        let value = NSColor(color).simpleCutHex
+        let binding = captionBinding(
+          keyPath,
+          fallback: "#FFFFFFFF",
+          recordsCheckpoint: true
+        )
+        binding.wrappedValue = value
+      }
+    )
+  }
+
+  private func deleteCaption(id: UUID) {
+    project.recordUndoCheckpoint()
+    project.overlays.removeAll { $0.id == id }
+    if project.selectedOverlayID == id {
+      project.selectedOverlayID = nil
+    }
+  }
+
+  private func colorBinding(hex: Binding<String>) -> Binding<Color> {
+    Binding(
+      get: { Color(nsColor: NSColor(hex: hex.wrappedValue)) },
+      set: { color in
+        let value = NSColor(color).simpleCutHex
+        guard value != hex.wrappedValue else { return }
+        project.recordUndoCheckpoint()
+        hex.wrappedValue = value
+      }
+    )
   }
 
   private func valueSlider(

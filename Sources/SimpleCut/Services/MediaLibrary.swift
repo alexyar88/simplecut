@@ -1,8 +1,13 @@
 import Foundation
 
 enum MediaLibrary {
-  static func recordingDestination() throws -> URL {
-    try mediaRoot()
+  static func recordingDestination(in directory: URL? = nil) throws -> URL {
+    let root = try directory ?? mediaRoot()
+    try FileManager.default.createDirectory(
+      at: root,
+      withIntermediateDirectories: true
+    )
+    return root
       .appendingPathComponent(UUID().uuidString)
       .appendingPathExtension("mov")
   }

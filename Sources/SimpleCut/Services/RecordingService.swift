@@ -82,6 +82,47 @@ enum CapturePreviewMode: String, CaseIterable, Identifiable {
   }
 }
 
+enum CaptureQuality: String, CaseIterable, Identifiable {
+  case hd720
+  case hd1080
+  case uhd4K
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .hd720: "720p"
+    case .hd1080: "1080p"
+    case .uhd4K: "4K"
+    }
+  }
+
+  var sessionPreset: AVCaptureSession.Preset {
+    switch self {
+    case .hd720: .hd1280x720
+    case .hd1080: .hd1920x1080
+    case .uhd4K: .hd4K3840x2160
+    }
+  }
+
+  var estimatedMegabytesPerMinute: Double {
+    switch self {
+    case .hd720: 70
+    case .hd1080: 140
+    case .uhd4K: 420
+    }
+  }
+}
+
+enum CaptureFrameRate: Int, CaseIterable, Identifiable {
+  case fps24 = 24
+  case fps30 = 30
+  case fps60 = 60
+
+  var id: Int { rawValue }
+  var title: String { "\(rawValue) fps" }
+}
+
 @MainActor
 final class RecordingService: NSObject, ObservableObject {
   @Published var cameras: [AVCaptureDevice] = []
@@ -102,11 +143,23 @@ final class RecordingService: NSObject, ObservableObject {
     }
   }
   @Published var isRecording = false
+  @Published var isStartingRecording = false
   @Published var recordingDuration = 0.0
   @Published var microphoneLevel = 0.0
   @Published var previewMode: CapturePreviewMode = .fit
+  @Published var quality: CaptureQuality = .hd1080 {
+    didSet {
+      UserDefaults.standard.set(quality.rawValue, forKey: Defaults.quality)
+    }
+  }
+  @Published var frameRate: CaptureFrameRate = .fps30 {
+    didSet {
+      UserDefaults.standard.set(frameRate.rawValue, forKey: Defaults.frameRate)
+    }
+  }
   @Published var countdown: Int?
   @Published var errorMessage: String?
+  @Published var outputDirectory: URL?
   @Published var captureRotation: CaptureRotation = .automatic {
     didSet {
       UserDefaults.standard.set(
@@ -123,19 +176,29 @@ final class RecordingService: NSObject, ObservableObject {
 
   let session = AVCaptureSession()
   private let movieOutput = AVCaptureMovieFileOutput()
+  private let audioLevelOutput = AVCaptureAudioDataOutput()
+  private let audioMeter = AudioLevelMonitor()
   private let sessionQueue = DispatchQueue(
     label: "app.simplecut.capture-session"
+  )
+  private let audioMeterQueue = DispatchQueue(
+    label: "app.simplecut.audio-meter",
+    qos: .userInteractive
   )
   private var completion: ((URL) -> Void)?
   private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
   private var countdownTask: Task<Void, Never>?
   private var meteringTask: Task<Void, Never>?
+  private var recordedDurationOffset = 0.0
+  private var shouldDiscardRecording = false
 
   private enum Defaults {
     static let cameraID = "recording.cameraID"
     static let microphoneID = "recording.microphoneID"
     static let captureRotation = "recording.captureRotation"
     static let isMirrored = "recording.isMirrored"
+    static let quality = "recording.quality"
+    static let frameRate = "recording.frameRate"
   }
 
   var selectedCamera: AVCaptureDevice? {
@@ -159,7 +222,24 @@ final class RecordingService: NSObject, ObservableObject {
     ), let savedRotation = CaptureRotation(rawValue: rawRotation) {
       captureRotation = savedRotation
     }
+    if let rawQuality = UserDefaults.standard.string(forKey: Defaults.quality),
+      let savedQuality = CaptureQuality(rawValue: rawQuality)
+    {
+      quality = savedQuality
+    }
+    if UserDefaults.standard.object(forKey: Defaults.frameRate) != nil,
+      let savedFrameRate = CaptureFrameRate(
+        rawValue: UserDefaults.standard.integer(forKey: Defaults.frameRate)
+      )
+    {
+      frameRate = savedFrameRate
+    }
     isMirrored = UserDefaults.standard.bool(forKey: Defaults.isMirrored)
+    audioMeter.onLevel = { [weak self] level in
+      Task { @MainActor [weak self] in
+        self?.microphoneLevel = Double(level)
+      }
+    }
     refreshDevices()
   }
 
@@ -216,7 +296,7 @@ final class RecordingService: NSObject, ObservableObject {
 
   func stopPreviewAndWait() async {
     cancelCountdown()
-    guard !isRecording else { return }
+    guard !isRecording, !isStartingRecording else { return }
     meteringTask?.cancel()
     meteringTask = nil
     microphoneLevel = 0
@@ -233,12 +313,12 @@ final class RecordingService: NSObject, ObservableObject {
   }
 
   func reconfigure() {
-    guard !isRecording else { return }
+    guard !isRecording, !isStartingRecording else { return }
     configureSession()
   }
 
   func applyVideoSettings() {
-    guard !isRecording,
+    guard !isRecording, !isStartingRecording,
       let connection = movieOutput.connection(with: .video)
     else { return }
     let automatic =
@@ -257,7 +337,13 @@ final class RecordingService: NSObject, ObservableObject {
   }
 
   func rotateClockwise() {
-    captureRotation = captureRotation.rotatedClockwise
+    if captureRotation == .automatic {
+      captureRotation = explicitRotation(for: previewRotationAngle)
+        .rotatedClockwise
+    } else {
+      captureRotation = captureRotation.rotatedClockwise
+    }
+    applyVideoSettings()
   }
 
   func rotateCounterclockwise() {
@@ -272,12 +358,19 @@ final class RecordingService: NSObject, ObservableObject {
     countdown seconds: Int = 3,
     completion: @escaping (URL) -> Void
   ) {
-    guard !movieOutput.isRecording, countdown == nil else { return }
+    guard !movieOutput.isRecording, !isStartingRecording, countdown == nil else {
+      return
+    }
     self.completion = completion
     countdownTask?.cancel()
+    if seconds <= 0 {
+      countdown = nil
+      beginRecording()
+      return
+    }
     countdownTask = Task { [weak self] in
       guard let self else { return }
-      for value in stride(from: max(1, seconds), through: 1, by: -1) {
+      for value in stride(from: seconds, through: 1, by: -1) {
         guard !Task.isCancelled else { return }
         countdown = value
         try? await Task.sleep(for: .seconds(1))
@@ -301,19 +394,41 @@ final class RecordingService: NSObject, ObservableObject {
     guard !movieOutput.isRecording else { return }
     applyVideoSettings()
     do {
-      let destination = try MediaLibrary.recordingDestination()
-      movieOutput.startRecording(to: destination, recordingDelegate: self)
-      isRecording = true
+      let destination = try MediaLibrary.recordingDestination(
+        in: outputDirectory
+      )
+      isStartingRecording = true
+      shouldDiscardRecording = false
       recordingDuration = 0
+      recordedDurationOffset = 0
+      movieOutput.startRecording(to: destination, recordingDelegate: self)
       startMetering()
     } catch {
+      isStartingRecording = false
       completion = nil
       errorMessage = error.localizedDescription
     }
   }
 
   func stopRecording() {
+    if movieOutput.isRecording {
+      movieOutput.stopRecording()
+    }
+  }
+
+  func cancelRecordingStart() {
+    guard isStartingRecording else { return }
+    shouldDiscardRecording = true
+    completion = nil
     movieOutput.stopRecording()
+    Task { [weak self] in
+      try? await Task.sleep(for: .seconds(1))
+      guard let self, shouldDiscardRecording, !movieOutput.isRecording else {
+        return
+      }
+      isStartingRecording = false
+      shouldDiscardRecording = false
+    }
   }
 
   private func startMetering() {
@@ -323,16 +438,9 @@ final class RecordingService: NSObject, ObservableObject {
         guard let self else { return }
         if isRecording {
           let seconds = CMTimeGetSeconds(movieOutput.recordedDuration)
-          recordingDuration = seconds.isFinite ? max(0, seconds) : 0
-        }
-        let decibels =
-          movieOutput.connection(with: .audio)?
-          .audioChannels.first?.averagePowerLevel ?? -60
-        let target = min(1, max(0, Double((decibels + 55) / 55)))
-        let response = target > microphoneLevel ? 0.58 : 0.22
-        microphoneLevel += (target - microphoneLevel) * response
-        if microphoneLevel < 0.002 {
-          microphoneLevel = 0
+          recordingDuration = seconds.isFinite
+            ? max(0, seconds - recordedDurationOffset)
+            : 0
         }
         try? await Task.sleep(for: .milliseconds(33))
       }
@@ -342,7 +450,9 @@ final class RecordingService: NSObject, ObservableObject {
   private func configureSession() {
     session.beginConfiguration()
     defer { session.commitConfiguration() }
-    session.sessionPreset = .high
+    session.sessionPreset = session.canSetSessionPreset(quality.sessionPreset)
+      ? quality.sessionPreset
+      : .high
     session.inputs.forEach(session.removeInput)
 
     if let camera = cameras.first(where: {
@@ -351,6 +461,7 @@ final class RecordingService: NSObject, ObservableObject {
       session.canAddInput(input)
     {
       session.addInput(input)
+      configureFrameRate(for: camera)
       rotationCoordinator = AVCaptureDevice.RotationCoordinator(
         device: camera,
         previewLayer: nil
@@ -370,11 +481,119 @@ final class RecordingService: NSObject, ObservableObject {
     {
       session.addOutput(movieOutput)
     }
+    if !session.outputs.contains(where: { $0 === audioLevelOutput }),
+      session.canAddOutput(audioLevelOutput)
+    {
+      audioLevelOutput.audioSettings = [
+        AVFormatIDKey: kAudioFormatLinearPCM,
+        AVLinearPCMBitDepthKey: 16,
+        AVLinearPCMIsFloatKey: false,
+        AVLinearPCMIsBigEndianKey: false,
+        AVLinearPCMIsNonInterleaved: false,
+      ]
+      session.addOutput(audioLevelOutput)
+      audioLevelOutput.setSampleBufferDelegate(
+        audioMeter,
+        queue: audioMeterQueue
+      )
+    }
     applyVideoSettings()
+  }
+
+  private func configureFrameRate(for camera: AVCaptureDevice) {
+    let requested = Double(frameRate.rawValue)
+    let supported = camera.activeFormat.videoSupportedFrameRateRanges
+      .contains { $0.minFrameRate <= requested && requested <= $0.maxFrameRate }
+    guard supported else { return }
+    do {
+      try camera.lockForConfiguration()
+      let duration = CMTime(value: 1, timescale: CMTimeScale(frameRate.rawValue))
+      camera.activeVideoMinFrameDuration = duration
+      camera.activeVideoMaxFrameDuration = duration
+      camera.unlockForConfiguration()
+    } catch {
+      errorMessage = "Не удалось установить \(frameRate.title): \(error.localizedDescription)"
+    }
+  }
+
+  private func explicitRotation(for angle: CGFloat) -> CaptureRotation {
+    let normalized = Int(angle.rounded() + 360) % 360
+    switch normalized {
+    case 45..<135: return .clockwise90
+    case 135..<225: return .upsideDown
+    case 225..<315: return .counterclockwise90
+    default: return .none
+    }
+  }
+}
+
+private final class AudioLevelMonitor:
+  NSObject,
+  AVCaptureAudioDataOutputSampleBufferDelegate,
+  @unchecked Sendable
+{
+  var onLevel: (@Sendable (Float) -> Void)?
+
+  func captureOutput(
+    _ output: AVCaptureOutput,
+    didOutput sampleBuffer: CMSampleBuffer,
+    from connection: AVCaptureConnection
+  ) {
+    guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+      return
+    }
+    let length = CMBlockBufferGetDataLength(blockBuffer)
+    guard length > 1 else { return }
+    var data = Data(count: length)
+    let status = data.withUnsafeMutableBytes { bytes in
+      guard let baseAddress = bytes.baseAddress else { return kCMBlockBufferBadCustomBlockSourceErr }
+      return CMBlockBufferCopyDataBytes(
+        blockBuffer,
+        atOffset: 0,
+        dataLength: length,
+        destination: baseAddress
+      )
+    }
+    guard status == kCMBlockBufferNoErr else { return }
+
+    let rms: Float = data.withUnsafeBytes { bytes in
+      let samples = bytes.bindMemory(to: Int16.self)
+      guard !samples.isEmpty else { return 0 }
+      var sum: Double = 0
+      for sample in samples {
+        let normalized = Double(sample) / Double(Int16.max)
+        sum += normalized * normalized
+      }
+      return Float(sqrt(sum / Double(samples.count)))
+    }
+    let decibels = rms > 0 ? 20 * log10(rms) : -60
+    let normalized = min(1, max(0, (decibels + 52) / 52))
+    let gated = normalized < 0.12 ? 0 : normalized
+    let stepped = (gated * 24).rounded() / 24
+    onLevel?(stepped)
   }
 }
 
 extension RecordingService: AVCaptureFileOutputRecordingDelegate {
+  nonisolated func fileOutput(
+    _ output: AVCaptureFileOutput,
+    didStartRecordingTo outputFileURL: URL,
+    from connections: [AVCaptureConnection]
+  ) {
+    Task { @MainActor in
+      if shouldDiscardRecording {
+        output.stopRecording()
+        isStartingRecording = false
+        return
+      }
+      let seconds = CMTimeGetSeconds(output.recordedDuration)
+      recordedDurationOffset = seconds.isFinite ? max(0, seconds) : 0
+      recordingDuration = 0
+      isStartingRecording = false
+      isRecording = true
+    }
+  }
+
   nonisolated func fileOutput(
     _ output: AVCaptureFileOutput,
     didFinishRecordingTo outputFileURL: URL,
@@ -383,11 +602,17 @@ extension RecordingService: AVCaptureFileOutputRecordingDelegate {
   ) {
     Task { @MainActor in
       isRecording = false
-      if let error {
+      isStartingRecording = false
+      recordingDuration = 0
+      recordedDurationOffset = 0
+      if shouldDiscardRecording {
+        try? FileManager.default.removeItem(at: outputFileURL)
+      } else if let error {
         errorMessage = error.localizedDescription
       } else {
         completion?(outputFileURL)
       }
+      shouldDiscardRecording = false
       countdownTask = nil
       completion = nil
     }

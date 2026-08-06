@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreGraphics
 import XCTest
 
@@ -59,6 +60,39 @@ final class ProjectModelsTests: XCTestCase {
       CanvasPreset.square.size.width,
       CanvasPreset.square.size.height
     )
+    XCTAssertEqual(CanvasPreset.vertical.aspectRatio, 9.0 / 16.0)
+    XCTAssertEqual(CanvasPreset.horizontal.aspectRatio, 16.0 / 9.0)
+    XCTAssertEqual(CanvasPreset.square.aspectRatio, 1)
+    XCTAssertTrue(CanvasPreset.vertical.title.contains("Вертикальный"))
+    XCTAssertTrue(CanvasPreset.horizontal.title.contains("Горизонтальный"))
+    XCTAssertTrue(CanvasPreset.square.title.contains("Квадратный"))
+  }
+
+  func testProjectFileRecognitionRejectsUnrelatedPackages() {
+    XCTAssertTrue(
+      ProjectPackageService.canOpen(
+        URL(fileURLWithPath: "/tmp/Монтаж.simplecut")
+      )
+    )
+    XCTAssertTrue(
+      ProjectPackageService.canOpen(
+        URL(fileURLWithPath: "/tmp/Монтаж.json")
+      )
+    )
+    XCTAssertFalse(
+      ProjectPackageService.canOpen(
+        URL(fileURLWithPath: "/Applications/Other.app")
+      )
+    )
+  }
+
+  @MainActor
+  func testBlankProjectNameHasReadableDisplayName() {
+    let project = EditorProject(loadRecovery: false)
+    project.name = " \n "
+    XCTAssertEqual(project.displayName, "Без названия")
+    project.name = "  Мой ролик  "
+    XCTAssertEqual(project.displayName, "Мой ролик")
   }
 
   func testProjectRoundTripKeepsClipsAndOverlays() throws {
@@ -93,6 +127,32 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertEqual(decoded.overlays, source.overlays)
     XCTAssertEqual(decoded.audio, source.audio)
     XCTAssertEqual(decoded.color, source.color)
+  }
+
+  func testLegacyOverlayGetsCaptionStyleDefaults() throws {
+    let json = """
+      {
+        "id": "\(UUID().uuidString)",
+        "kind": "caption",
+        "startTime": 0,
+        "duration": 1,
+        "text": "Старый проект",
+        "fontSize": 58,
+        "foregroundHex": "#FFFFFF",
+        "backgroundHex": "#000000B3"
+      }
+      """
+    let item = try JSONDecoder().decode(
+      OverlayItem.self,
+      from: Data(json.utf8)
+    )
+
+    XCTAssertEqual(item.fontName, "Helvetica Neue")
+    XCTAssertEqual(item.fontWeight, .semibold)
+    XCTAssertEqual(item.strokeHex, "#000000FF")
+    XCTAssertEqual(item.strokeWidth, 0)
+    XCTAssertEqual(item.textPadding, 12)
+    XCTAssertEqual(item.cornerRadius, 8)
   }
 
   func testCaptionGeneratorSplitsLongTextAndKeepsTiming() {
@@ -380,6 +440,32 @@ final class ProjectModelsTests: XCTestCase {
   }
 
   @MainActor
+  func testDeletingLastClipClearsPlaybackStateSynchronously() {
+    let project = EditorProject(loadRecovery: false)
+    let clip = VideoClip(
+      sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+      sourceStart: 0,
+      duration: 1,
+      sourceDuration: 1
+    )
+    project.clips = [clip]
+    project.waveform = [0.5]
+    project.timelineZoom = 4
+    project.player.replaceCurrentItem(
+      with: AVPlayerItem(asset: AVMutableComposition())
+    )
+    project.selectClip(id: clip.id)
+
+    project.deleteSelectedClips()
+
+    XCTAssertTrue(project.clips.isEmpty)
+    XCTAssertNil(project.player.currentItem)
+    XCTAssertTrue(project.waveform.isEmpty)
+    XCTAssertEqual(project.playhead, 0)
+    XCTAssertEqual(project.timelineZoom, 1)
+  }
+
+  @MainActor
   func testClipEdgesCanShrinkAndRestoreAvailableSource() {
     let project = EditorProject(loadRecovery: false)
     let source = URL(fileURLWithPath: "/tmp/source.mov")
@@ -508,6 +594,226 @@ final class ProjectModelsTests: XCTestCase {
   }
 
   @MainActor
+  func testCaptionRegenerationKeepsCurrentProjectStyle() {
+    let defaults = isolatedCaptionStyleDefaults()
+    let project = EditorProject(
+      loadRecovery: false,
+      captionStyleDefaults: defaults
+    )
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 5
+      )
+    ]
+    _ = project.replaceCaptions(with: [
+      CaptionDraft(text: "Первая версия", startTime: 0, endTime: 1)
+    ])
+    project.overlays[0].fontSize = 91
+    project.overlays[0].strokeHex = "#FF00FFFF"
+    project.overlays[0].strokeWidth = 7
+    project.overlays[0].normalizedY = 0.63
+
+    let regenerated = project.replaceCaptions(with: [
+      CaptionDraft(text: "Новая версия", startTime: 1, endTime: 2),
+      CaptionDraft(text: "Ещё одна", startTime: 2, endTime: 3),
+    ])
+
+    XCTAssertEqual(regenerated.count, 2)
+    XCTAssertTrue(regenerated.allSatisfy {
+      $0.fontSize == 91
+        && $0.strokeHex == "#FF00FFFF"
+        && $0.strokeWidth == 7
+        && $0.normalizedY == 0.63
+    })
+  }
+
+  @MainActor
+  func testSavedCaptionStyleIsUsedByANewProject() {
+    let defaults = isolatedCaptionStyleDefaults()
+    let firstProject = EditorProject(
+      loadRecovery: false,
+      captionStyleDefaults: defaults
+    )
+    firstProject.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 5
+      )
+    ]
+    _ = firstProject.replaceCaptions(with: [
+      CaptionDraft(text: "Сохранить", startTime: 0, endTime: 1)
+    ])
+    firstProject.overlays[0].fontName = "Georgia"
+    firstProject.overlays[0].fontSize = 76
+    firstProject.overlays[0].foregroundHex = "#11AA33FF"
+    firstProject.overlays[0].normalizedX = 0.42
+    firstProject.saveCurrentCaptionStyle()
+
+    let secondProject = EditorProject(
+      loadRecovery: false,
+      captionStyleDefaults: defaults
+    )
+    secondProject.clips = firstProject.clips
+    let captions = secondProject.replaceCaptions(with: [
+      CaptionDraft(text: "Применить", startTime: 0, endTime: 1)
+    ])
+
+    XCTAssertTrue(secondProject.hasSavedCaptionStyle)
+    XCTAssertEqual(captions[0].fontName, "Georgia")
+    XCTAssertEqual(captions[0].fontSize, 76)
+    XCTAssertEqual(captions[0].foregroundHex, "#11AA33FF")
+    XCTAssertEqual(captions[0].normalizedX, 0.42)
+  }
+
+  @MainActor
+  func testDeletingSavedCaptionStyleRestoresClassicForFutureProjects() {
+    let defaults = isolatedCaptionStyleDefaults()
+    CaptionStyleStore.saveCustom(
+      CaptionStyle(fontSize: 103, fontName: "Menlo"),
+      in: defaults
+    )
+    let project = EditorProject(
+      loadRecovery: false,
+      captionStyleDefaults: defaults
+    )
+
+    project.deleteSavedCaptionStyle()
+
+    XCTAssertFalse(project.hasSavedCaptionStyle)
+    XCTAssertNil(CaptionStyleStore.customStyle(in: defaults))
+    XCTAssertEqual(
+      CaptionStyleStore.activeStyle(in: defaults),
+      CaptionStylePreset.classic.style
+    )
+  }
+
+  @MainActor
+  func testLargeV3IsTheDefaultTranscriptionModel() {
+    let project = EditorProject(
+      loadRecovery: false,
+      captionStyleDefaults: isolatedCaptionStyleDefaults()
+    )
+
+    XCTAssertEqual(project.transcriptionModel, .accurate)
+  }
+
+  @MainActor
+  func testCaptionsCanBeSplitIntoTimedWordsWithoutChangingTotalRange() {
+    let project = EditorProject(loadRecovery: false)
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 5
+      )
+    ]
+    _ = project.replaceCaptions(with: [
+      CaptionDraft(text: "одно длинное слово", startTime: 1, endTime: 4)
+    ])
+
+    project.splitCaptionsIntoWords()
+
+    let captions = project.overlays.filter { $0.kind == .caption }
+    XCTAssertEqual(captions.map(\.text), ["одно", "длинное", "слово"])
+    XCTAssertEqual(captions.first?.startTime, 1)
+    XCTAssertEqual(
+      captions.reduce(0) { $0 + $1.duration },
+      3,
+      accuracy: 0.0001
+    )
+    let last = try! XCTUnwrap(captions.last)
+    XCTAssertEqual(
+      last.startTime + last.duration,
+      4,
+      accuracy: 0.0001
+    )
+  }
+
+  @MainActor
+  func testMovingCaptionPositionMovesTheWholeCaptionGroup() {
+    let project = EditorProject(loadRecovery: false)
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 5
+      )
+    ]
+    _ = project.replaceCaptions(with: [
+      CaptionDraft(text: "Первая", startTime: 0, endTime: 1),
+      CaptionDraft(text: "Вторая", startTime: 1, endTime: 2),
+    ])
+
+    project.setCaptionPosition(normalizedX: 0.25, normalizedY: 0.7)
+
+    XCTAssertTrue(
+      project.overlays
+        .filter { $0.kind == .caption }
+        .allSatisfy {
+          $0.normalizedX == 0.25 && $0.normalizedY == 0.7
+        }
+    )
+  }
+
+  @MainActor
+  func testSelectedCaptionCanBeDeletedWithoutDeletingClips() {
+    let project = EditorProject(loadRecovery: false)
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 5
+      )
+    ]
+    let captions = project.replaceCaptions(with: [
+      CaptionDraft(text: "Удалить", startTime: 0, endTime: 1),
+      CaptionDraft(text: "Оставить", startTime: 1, endTime: 2),
+    ])
+    project.selectOverlay(id: captions[0].id)
+
+    project.deleteSelectedOverlay()
+
+    XCTAssertEqual(project.clips.count, 1)
+    XCTAssertEqual(
+      project.overlays.filter { $0.kind == .caption }.map(\.text),
+      ["Оставить"]
+    )
+    XCTAssertNil(project.selectedOverlayID)
+  }
+
+  @MainActor
+  func testAllCaptionsCanBeDeletedAndRestoredWithUndo() {
+    let project = EditorProject(loadRecovery: false)
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 5
+      )
+    ]
+    _ = project.replaceCaptions(with: [
+      CaptionDraft(text: "Первый", startTime: 0, endTime: 1),
+      CaptionDraft(text: "Второй", startTime: 1, endTime: 2),
+    ])
+
+    project.deleteAllCaptions()
+
+    XCTAssertTrue(project.overlays.allSatisfy { $0.kind != .caption })
+    XCTAssertNil(project.selectedOverlayID)
+    XCTAssertEqual(project.status, "Субтитры удалены")
+
+    project.undo()
+
+    XCTAssertEqual(
+      project.overlays.filter { $0.kind == .caption }.count,
+      2
+    )
+  }
+
+  @MainActor
   func testUndoRestoresEditingContext() {
     let project = EditorProject(loadRecovery: false)
     project.clips = [
@@ -604,6 +910,13 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertNotEqual(first, second)
     XCTAssertEqual(try Data(contentsOf: first), contents)
     XCTAssertEqual(try Data(contentsOf: second), contents)
+  }
+
+  private func isolatedCaptionStyleDefaults() -> UserDefaults {
+    let suiteName = "SimpleCutTests.CaptionStyle.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defaults.removePersistentDomain(forName: suiteName)
+    return defaults
   }
 
   func testPortableProjectPackageCopiesAndResolvesMedia() throws {

@@ -1,18 +1,14 @@
 @preconcurrency import AVFoundation
+import AudioToolbox
 import Foundation
-
-struct AudioMeasurement: Equatable {
-  let estimatedLUFS: Double
-  let peakDBFS: Double
-}
 
 struct ProcessedAudio {
   let url: URL
-  let measurement: AudioMeasurement
-  let appliedGainDB: Double
 }
 
 enum AudioProcessingService {
+  private static let maximumFrames: AVAudioFrameCount = 4_096
+
   static func process(
     clips: [VideoClip],
     settings: AudioSettings
@@ -21,33 +17,160 @@ enum AudioProcessingService {
     let source = try await AudioRenderService.render(clips: clips)
     defer { try? FileManager.default.removeItem(at: source) }
 
-    let inputFile = try AVAudioFile(forReading: source)
-    let measurement = try measure(inputFile)
-    var gain = settings.masterGainDB
-    if settings.normalizeLoudness {
-      gain += settings.targetLUFS - measurement.estimatedLUFS
-    }
-    if settings.limiterEnabled {
-      gain = min(gain, settings.peakCeilingDB - measurement.peakDBFS)
-    }
-    gain = min(12, max(-30, gain))
-
     let pcmDestination = FileManager.default.temporaryDirectory
       .appendingPathComponent("SimpleCut-Processed-\(UUID().uuidString).caf")
-    try render(
-      inputFile: inputFile,
+    try renderAutoEnhancedAudio(
+      from: source,
       to: pcmDestination,
-      gainDB: gain,
-      ceilingDB: settings.peakCeilingDB,
-      limiterEnabled: settings.limiterEnabled
+      settings: settings
     )
     defer { try? FileManager.default.removeItem(at: pcmDestination) }
-    let destination = try await encodeM4A(from: pcmDestination)
-    return ProcessedAudio(
-      url: destination,
-      measurement: measurement,
-      appliedGainDB: gain
+
+    return ProcessedAudio(url: try await encodeM4A(from: pcmDestination))
+  }
+
+  private static func renderAutoEnhancedAudio(
+    from source: URL,
+    to destination: URL,
+    settings: AudioSettings
+  ) throws {
+    let inputFile = try AVAudioFile(forReading: source)
+    let format = inputFile.processingFormat
+    let engine = AVAudioEngine()
+    let player = AVAudioPlayerNode()
+    let dynamics = makeEffect(subtype: kAudioUnitSubType_DynamicsProcessor)
+    let limiter = makeEffect(subtype: kAudioUnitSubType_PeakLimiter)
+
+    engine.attach(player)
+    engine.attach(dynamics)
+    engine.attach(limiter)
+    engine.connect(player, to: dynamics, format: format)
+    engine.connect(dynamics, to: limiter, format: format)
+    engine.connect(limiter, to: engine.mainMixerNode, format: format)
+
+    dynamics.bypass = !settings.normalizeLoudness
+    limiter.bypass = !settings.limiterEnabled
+    try applyAutoPreset(to: dynamics, settings: settings)
+    try setParameter(
+      kLimiterParam_PreGain,
+      value: 0,
+      on: limiter
     )
+    engine.mainMixerNode.outputVolume = settings.limiterEnabled
+      ? Float(pow(10, settings.peakCeilingDB / 20))
+      : 1
+
+    try engine.enableManualRenderingMode(
+      .offline,
+      format: format,
+      maximumFrameCount: maximumFrames
+    )
+    guard let buffer = AVAudioPCMBuffer(
+      pcmFormat: engine.manualRenderingFormat,
+      frameCapacity: maximumFrames
+    ) else {
+      throw EditorError.exportFailed
+    }
+    let outputFile = try AVAudioFile(
+      forWriting: destination,
+      settings: engine.manualRenderingFormat.settings
+    )
+
+    player.scheduleFile(inputFile, at: nil)
+    engine.prepare()
+    try engine.start()
+    player.play()
+    defer {
+      player.stop()
+      engine.stop()
+    }
+
+    var emptyRenderCount = 0
+    while engine.manualRenderingSampleTime < inputFile.length {
+      let remaining = inputFile.length - engine.manualRenderingSampleTime
+      let frames = min(maximumFrames, AVAudioFrameCount(remaining))
+      switch try engine.renderOffline(frames, to: buffer) {
+      case .success:
+        emptyRenderCount = 0
+        try outputFile.write(from: buffer)
+      case .cannotDoInCurrentContext, .insufficientDataFromInputNode:
+        emptyRenderCount += 1
+        guard emptyRenderCount < 100 else {
+          throw EditorError.exportFailed
+        }
+      case .error:
+        throw EditorError.exportFailed
+      @unknown default:
+        throw EditorError.exportFailed
+      }
+    }
+  }
+
+  private static func applyAutoPreset(
+    to dynamics: AVAudioUnitEffect,
+    settings: AudioSettings
+  ) throws {
+    guard settings.normalizeLoudness else { return }
+
+    // A restrained one-click preset: quiet material gets makeup gain while
+    // Apple’s Dynamics Processor compresses louder passages automatically.
+    try setParameter(
+      kDynamicsProcessorParam_Threshold,
+      value: -20,
+      on: dynamics
+    )
+    try setParameter(
+      kDynamicsProcessorParam_HeadRoom,
+      value: 6,
+      on: dynamics
+    )
+    try setParameter(
+      kDynamicsProcessorParam_ExpansionRatio,
+      value: 1,
+      on: dynamics
+    )
+    try setParameter(
+      kDynamicsProcessorParam_AttackTime,
+      value: 0.005,
+      on: dynamics
+    )
+    try setParameter(
+      kDynamicsProcessorParam_ReleaseTime,
+      value: 0.12,
+      on: dynamics
+    )
+    try setParameter(
+      kDynamicsProcessorParam_OverallGain,
+      value: 8,
+      on: dynamics
+    )
+  }
+
+  private static func makeEffect(subtype: OSType) -> AVAudioUnitEffect {
+    AVAudioUnitEffect(
+      audioComponentDescription: AudioComponentDescription(
+        componentType: kAudioUnitType_Effect,
+        componentSubType: subtype,
+        componentManufacturer: kAudioUnitManufacturer_Apple,
+        componentFlags: 0,
+        componentFlagsMask: 0
+      )
+    )
+  }
+
+  private static func setParameter(
+    _ parameter: AudioUnitParameterID,
+    value: AudioUnitParameterValue,
+    on effect: AVAudioUnitEffect
+  ) throws {
+    guard
+      let parameter = effect.auAudioUnit.parameterTree?.parameter(
+        withAddress: AUParameterAddress(parameter)
+      )
+    else {
+      throw EditorError.exportFailed
+    }
+    parameter.value = value
   }
 
   private static func encodeM4A(from source: URL) async throws -> URL {
@@ -76,82 +199,5 @@ enum AudioProcessingService {
       }
     }
     return false
-  }
-
-  private static func measure(_ file: AVAudioFile) throws -> AudioMeasurement {
-    file.framePosition = 0
-    let format = file.processingFormat
-    guard let buffer = AVAudioPCMBuffer(
-      pcmFormat: format,
-      frameCapacity: 8_192
-    ) else {
-      throw EditorError.exportFailed
-    }
-    var sumSquares = 0.0
-    var sampleCount = 0
-    var peak = 0.0
-    while file.framePosition < file.length {
-      try file.read(into: buffer)
-      guard let channels = buffer.floatChannelData else {
-        throw EditorError.exportFailed
-      }
-      for channel in 0..<Int(format.channelCount) {
-        for frame in 0..<Int(buffer.frameLength) {
-          let sample = Double(channels[channel][frame])
-          sumSquares += sample * sample
-          peak = max(peak, abs(sample))
-          sampleCount += 1
-        }
-      }
-    }
-    file.framePosition = 0
-    guard sampleCount > 0 else {
-      return AudioMeasurement(estimatedLUFS: -70, peakDBFS: -70)
-    }
-    let meanSquare = max(sumSquares / Double(sampleCount), 1e-12)
-    let estimatedLUFS = -0.691 + 10 * log10(meanSquare)
-    let peakDBFS = 20 * log10(max(peak, 1e-12))
-    return AudioMeasurement(
-      estimatedLUFS: estimatedLUFS,
-      peakDBFS: peakDBFS
-    )
-  }
-
-  private static func render(
-    inputFile: AVAudioFile,
-    to destination: URL,
-    gainDB: Double,
-    ceilingDB: Double,
-    limiterEnabled: Bool
-  ) throws {
-    let format = inputFile.processingFormat
-    let output = try AVAudioFile(
-      forWriting: destination,
-      settings: format.settings
-    )
-    guard let buffer = AVAudioPCMBuffer(
-      pcmFormat: format,
-      frameCapacity: 8_192
-    ) else {
-      throw EditorError.exportFailed
-    }
-    let gain = Float(pow(10, gainDB / 20))
-    let ceiling = Float(pow(10, ceilingDB / 20))
-    while inputFile.framePosition < inputFile.length {
-      try inputFile.read(into: buffer)
-      guard let channels = buffer.floatChannelData else {
-        throw EditorError.exportFailed
-      }
-      for channel in 0..<Int(format.channelCount) {
-        for frame in 0..<Int(buffer.frameLength) {
-          var sample = channels[channel][frame] * gain
-          if limiterEnabled {
-            sample = min(ceiling, max(-ceiling, sample))
-          }
-          channels[channel][frame] = sample
-        }
-      }
-      try output.write(from: buffer)
-    }
   }
 }

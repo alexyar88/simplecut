@@ -10,9 +10,9 @@ enum CanvasPreset: String, Codable, CaseIterable, Identifiable {
 
   var title: String {
     switch self {
-    case .vertical: "9:16"
-    case .horizontal: "16:9"
-    case .square: "1:1"
+    case .vertical: "Вертикальный · 9:16"
+    case .horizontal: "Горизонтальный · 16:9"
+    case .square: "Квадратный · 1:1"
     }
   }
 
@@ -22,6 +22,10 @@ enum CanvasPreset: String, Codable, CaseIterable, Identifiable {
     case .horizontal: CGSize(width: 1920, height: 1080)
     case .square: CGSize(width: 1080, height: 1080)
     }
+  }
+
+  var aspectRatio: CGFloat {
+    size.width / size.height
   }
 }
 
@@ -50,10 +54,8 @@ struct VideoClip: Identifiable, Codable, Equatable {
 
 struct AudioSettings: Codable, Equatable {
   var normalizeLoudness = false
-  var targetLUFS = -14.0
   var limiterEnabled = true
   var peakCeilingDB = -1.0
-  var masterGainDB = 0.0
 }
 
 struct ColorSettings: Codable, Equatable {
@@ -169,6 +171,24 @@ enum OverlayKind: String, Codable {
   }
 }
 
+enum CaptionFontWeight: String, Codable, CaseIterable, Identifiable {
+  case regular
+  case semibold
+  case bold
+  case heavy
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .regular: "Обычный"
+    case .semibold: "Полужирный"
+    case .bold: "Жирный"
+    case .heavy: "Очень жирный"
+    }
+  }
+}
+
 enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
   case base
   case accurate = "large-v3-v20240930_626MB"
@@ -227,8 +247,220 @@ struct OverlayItem: Identifiable, Codable, Equatable {
   var text: String?
   var imageURL: URL?
   var fontSize: Double = 64
+  var fontName: String = "Helvetica Neue"
+  var fontWeight: CaptionFontWeight = .semibold
   var foregroundHex: String = "#FFFFFF"
   var backgroundHex: String = "#00000099"
+  var strokeHex: String = "#000000FF"
+  var strokeWidth: Double = 0
+  var textPadding: Double = 12
+  var cornerRadius: Double = 8
+
+  enum CodingKeys: String, CodingKey {
+    case id, kind, startTime, duration, normalizedX, normalizedY
+    case normalizedWidth, rotation, opacity, text, imageURL, fontSize
+    case fontName, fontWeight, foregroundHex, backgroundHex
+    case strokeHex, strokeWidth, textPadding, cornerRadius
+  }
+
+  init(
+    id: UUID = UUID(),
+    kind: OverlayKind,
+    startTime: Double,
+    duration: Double,
+    normalizedX: Double = 0.5,
+    normalizedY: Double = 0.5,
+    normalizedWidth: Double = 0.5,
+    rotation: Double = 0,
+    opacity: Double = 1,
+    text: String? = nil,
+    imageURL: URL? = nil,
+    fontSize: Double = 64,
+    fontName: String = "Helvetica Neue",
+    fontWeight: CaptionFontWeight = .semibold,
+    foregroundHex: String = "#FFFFFF",
+    backgroundHex: String = "#00000099",
+    strokeHex: String = "#000000FF",
+    strokeWidth: Double = 0,
+    textPadding: Double = 12,
+    cornerRadius: Double = 8
+  ) {
+    self.id = id
+    self.kind = kind
+    self.startTime = startTime
+    self.duration = duration
+    self.normalizedX = normalizedX
+    self.normalizedY = normalizedY
+    self.normalizedWidth = normalizedWidth
+    self.rotation = rotation
+    self.opacity = opacity
+    self.text = text
+    self.imageURL = imageURL
+    self.fontSize = fontSize
+    self.fontName = fontName
+    self.fontWeight = fontWeight
+    self.foregroundHex = foregroundHex
+    self.backgroundHex = backgroundHex
+    self.strokeHex = strokeHex
+    self.strokeWidth = strokeWidth
+    self.textPadding = textPadding
+    self.cornerRadius = cornerRadius
+  }
+
+  init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+    kind = try values.decode(OverlayKind.self, forKey: .kind)
+    startTime = try values.decode(Double.self, forKey: .startTime)
+    duration = try values.decode(Double.self, forKey: .duration)
+    normalizedX = try values.decodeIfPresent(Double.self, forKey: .normalizedX) ?? 0.5
+    normalizedY = try values.decodeIfPresent(Double.self, forKey: .normalizedY) ?? 0.5
+    normalizedWidth =
+      try values.decodeIfPresent(Double.self, forKey: .normalizedWidth) ?? 0.5
+    rotation = try values.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
+    opacity = try values.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
+    text = try values.decodeIfPresent(String.self, forKey: .text)
+    imageURL = try values.decodeIfPresent(URL.self, forKey: .imageURL)
+    fontSize = try values.decodeIfPresent(Double.self, forKey: .fontSize) ?? 64
+    fontName =
+      try values.decodeIfPresent(String.self, forKey: .fontName)
+      ?? "Helvetica Neue"
+    fontWeight =
+      try values.decodeIfPresent(CaptionFontWeight.self, forKey: .fontWeight)
+      ?? .semibold
+    foregroundHex =
+      try values.decodeIfPresent(String.self, forKey: .foregroundHex)
+      ?? "#FFFFFF"
+    backgroundHex =
+      try values.decodeIfPresent(String.self, forKey: .backgroundHex)
+      ?? "#00000099"
+    strokeHex =
+      try values.decodeIfPresent(String.self, forKey: .strokeHex)
+      ?? "#000000FF"
+    strokeWidth =
+      try values.decodeIfPresent(Double.self, forKey: .strokeWidth) ?? 0
+    textPadding =
+      try values.decodeIfPresent(Double.self, forKey: .textPadding) ?? 12
+    cornerRadius =
+      try values.decodeIfPresent(Double.self, forKey: .cornerRadius) ?? 8
+  }
+}
+
+enum CaptionStylePreset: String, CaseIterable, Identifiable {
+  case classic
+  case accent
+  case plain
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .classic: "Классический"
+    case .accent: "Акцентный"
+    case .plain: "Без подложки"
+    }
+  }
+
+  var style: CaptionStyle {
+    switch self {
+    case .classic:
+      CaptionStyle()
+    case .accent:
+      CaptionStyle(
+        fontName: "Avenir Next",
+        fontWeight: .heavy,
+        foregroundHex: "#111111FF",
+        backgroundHex: "#FFD60AFF",
+        strokeHex: "#FFFFFFFF",
+        strokeWidth: 0,
+        textPadding: 15,
+        cornerRadius: 12
+      )
+    case .plain:
+      CaptionStyle(
+        fontWeight: .bold,
+        foregroundHex: "#FFFFFFFF",
+        backgroundHex: "#00000000",
+        strokeHex: "#000000FF",
+        strokeWidth: 3,
+        textPadding: 4,
+        cornerRadius: 0
+      )
+    }
+  }
+}
+
+struct CaptionStyle: Codable, Equatable {
+  var normalizedX = 0.5
+  var normalizedY = 0.84
+  var normalizedWidth = 0.82
+  var fontSize = 58.0
+  var fontName = "Helvetica Neue"
+  var fontWeight = CaptionFontWeight.semibold
+  var foregroundHex = "#FFFFFFFF"
+  var backgroundHex = "#000000B3"
+  var strokeHex = "#000000FF"
+  var strokeWidth = 0.0
+  var textPadding = 12.0
+  var cornerRadius = 8.0
+
+  init(
+    normalizedX: Double = 0.5,
+    normalizedY: Double = 0.84,
+    normalizedWidth: Double = 0.82,
+    fontSize: Double = 58,
+    fontName: String = "Helvetica Neue",
+    fontWeight: CaptionFontWeight = .semibold,
+    foregroundHex: String = "#FFFFFFFF",
+    backgroundHex: String = "#000000B3",
+    strokeHex: String = "#000000FF",
+    strokeWidth: Double = 0,
+    textPadding: Double = 12,
+    cornerRadius: Double = 8
+  ) {
+    self.normalizedX = normalizedX
+    self.normalizedY = normalizedY
+    self.normalizedWidth = normalizedWidth
+    self.fontSize = fontSize
+    self.fontName = fontName
+    self.fontWeight = fontWeight
+    self.foregroundHex = foregroundHex
+    self.backgroundHex = backgroundHex
+    self.strokeHex = strokeHex
+    self.strokeWidth = strokeWidth
+    self.textPadding = textPadding
+    self.cornerRadius = cornerRadius
+  }
+
+  init(item: OverlayItem) {
+    normalizedX = item.normalizedX
+    normalizedY = item.normalizedY
+    normalizedWidth = item.normalizedWidth
+    fontSize = item.fontSize
+    fontName = item.fontName
+    fontWeight = item.fontWeight
+    foregroundHex = item.foregroundHex
+    backgroundHex = item.backgroundHex
+    strokeHex = item.strokeHex
+    strokeWidth = item.strokeWidth
+    textPadding = item.textPadding
+    cornerRadius = item.cornerRadius
+  }
+
+  func apply(to item: inout OverlayItem) {
+    item.normalizedX = normalizedX
+    item.normalizedY = normalizedY
+    item.normalizedWidth = normalizedWidth
+    item.fontSize = fontSize
+    item.fontName = fontName
+    item.fontWeight = fontWeight
+    item.foregroundHex = foregroundHex
+    item.backgroundHex = backgroundHex
+    item.strokeHex = strokeHex
+    item.strokeWidth = strokeWidth
+    item.textPadding = textPadding
+    item.cornerRadius = cornerRadius
+  }
 }
 
 struct ProjectFile: Codable {

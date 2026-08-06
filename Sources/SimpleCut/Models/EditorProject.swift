@@ -23,7 +23,7 @@ final class EditorProject: ObservableObject {
   @Published var isBusy = false
   @Published var status = "Добавьте видео, чтобы начать"
   @Published var lastError: String?
-  @Published var transcriptionModel: TranscriptionModel = .base
+  @Published var transcriptionModel: TranscriptionModel = .accurate
   @Published var transcriptionLanguage: TranscriptionLanguage = .automatic
   @Published var transcriptionProgress: Double?
   @Published var exportProgress: Double?
@@ -34,10 +34,15 @@ final class EditorProject: ObservableObject {
   @Published private(set) var canRedo = false
   @Published private(set) var isDirty = false
   @Published private(set) var currentProjectURL: URL?
+  @Published private(set) var hasSavedCaptionStyle = false
 
   let player = AVPlayer()
   private let transcriptionService = LocalTranscriptionService()
+  private let captionStyleDefaults: UserDefaults
   private var waveformGenerationID = UUID()
+  private var playbackGenerationID = UUID()
+  private var previewAudioURL: URL?
+  private var resumePlaybackAfterAudioRebuild = false
   private struct HistorySnapshot {
     var project: ProjectFile
     var selectedClipIDs: Set<UUID>
@@ -55,7 +60,13 @@ final class EditorProject: ObservableObject {
   private var isSynchronizingClipSelection = false
   private var securityScopedProjectURL: URL?
 
-  init(loadRecovery: Bool = true) {
+  init(
+    loadRecovery: Bool = true,
+    captionStyleDefaults: UserDefaults = .standard
+  ) {
+    self.captionStyleDefaults = captionStyleDefaults
+    hasSavedCaptionStyle =
+      CaptionStyleStore.customStyle(in: captionStyleDefaults) != nil
     guard loadRecovery else { return }
     guard let recovered = try? RecoveryService.load() else { return }
     name = recovered.name
@@ -93,6 +104,11 @@ final class EditorProject: ObservableObject {
     clips.reduce(0) { $0 + $1.duration }
   }
 
+  var displayName: String {
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? "Без названия" : trimmed
+  }
+
   var selectedOverlayIndex: Int? {
     guard let selectedOverlayID else { return nil }
     return overlays.firstIndex { $0.id == selectedOverlayID }
@@ -103,6 +119,14 @@ final class EditorProject: ObservableObject {
       return nil
     }
     return clips.firstIndex { $0.id == id }
+  }
+
+  var canDeleteCurrentCaptionStyle: Bool {
+    guard
+      let item = overlays.first(where: { $0.kind == .caption }),
+      let saved = CaptionStyleStore.customStyle(in: captionStyleDefaults)
+    else { return false }
+    return CaptionStyle(item: item) == saved
   }
 
   var canSplitAtPlayhead: Bool {
@@ -124,8 +148,10 @@ final class EditorProject: ObservableObject {
 
   func reset() {
     waveformGenerationID = UUID()
+    playbackGenerationID = UUID()
     player.pause()
     player.replaceCurrentItem(with: nil)
+    discardPreviewAudio()
     name = "Без названия"
     canvas = .vertical
     scalingMode = .fit
@@ -339,8 +365,23 @@ final class EditorProject: ObservableObject {
     transcriptionTask?.cancel()
   }
 
+  func deleteAllCaptions() {
+    guard overlays.contains(where: { $0.kind == .caption }) else { return }
+    recordUndoCheckpoint()
+    overlays.removeAll { $0.kind == .caption }
+    if selectedOverlayID.flatMap({
+      id in overlays.first(where: { $0.id == id })
+    }) == nil {
+      selectedOverlayID = nil
+    }
+    status = "Субтитры удалены"
+  }
+
   @discardableResult
   func replaceCaptions(with drafts: [CaptionDraft]) -> [OverlayItem] {
+    let style =
+      overlays.first(where: { $0.kind == .caption }).map(CaptionStyle.init)
+      ?? CaptionStyleStore.activeStyle(in: captionStyleDefaults)
     overlays.removeAll { $0.kind == .caption }
     let captions = drafts.compactMap { draft -> OverlayItem? in
       let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -349,18 +390,14 @@ final class EditorProject: ObservableObject {
       guard !text.isEmpty, start < duration, end - start >= 0.05 else {
         return nil
       }
-      return OverlayItem(
+      var item = OverlayItem(
         kind: .caption,
         startTime: start,
         duration: end - start,
-        normalizedX: 0.5,
-        normalizedY: 0.84,
-        normalizedWidth: 0.82,
-        text: text,
-        fontSize: 58,
-        foregroundHex: "#FFFFFF",
-        backgroundHex: "#000000B3"
+        text: text
       )
+      style.apply(to: &item)
+      return item
     }
     overlays.append(contentsOf: captions)
     selectedOverlayID = captions.first?.id
@@ -369,6 +406,143 @@ final class EditorProject: ObservableObject {
       seek(to: first.startTime)
     }
     return captions
+  }
+
+  func selectOverlay(id: UUID, seekToStart: Bool = false) {
+    guard let item = overlays.first(where: { $0.id == id }) else { return }
+    clearClipSelection()
+    selectedOverlayID = id
+    if seekToStart {
+      seek(to: item.startTime)
+    }
+  }
+
+  func applySelectedCaptionStyleToAll() {
+    guard
+      let selectedOverlayIndex,
+      overlays[selectedOverlayIndex].kind == .caption
+    else { return }
+    recordUndoCheckpoint()
+    let source = overlays[selectedOverlayIndex]
+    for index in overlays.indices where overlays[index].kind == .caption {
+      overlays[index].fontSize = source.fontSize
+      overlays[index].fontName = source.fontName
+      overlays[index].fontWeight = source.fontWeight
+      overlays[index].foregroundHex = source.foregroundHex
+      overlays[index].backgroundHex = source.backgroundHex
+      overlays[index].strokeHex = source.strokeHex
+      overlays[index].strokeWidth = source.strokeWidth
+      overlays[index].textPadding = source.textPadding
+      overlays[index].cornerRadius = source.cornerRadius
+      overlays[index].normalizedX = source.normalizedX
+      overlays[index].normalizedY = source.normalizedY
+      overlays[index].normalizedWidth = source.normalizedWidth
+    }
+  }
+
+  func setCaptionPosition(normalizedX: Double, normalizedY: Double) {
+    let x = min(1, max(0, normalizedX))
+    let y = min(1, max(0, normalizedY))
+    for index in overlays.indices where overlays[index].kind == .caption {
+      overlays[index].normalizedX = x
+      overlays[index].normalizedY = y
+    }
+  }
+
+  func applyCaptionPreset(_ preset: CaptionStylePreset) {
+    applyCaptionStyle(preset.style)
+    CaptionStyleStore.select(preset: preset, in: captionStyleDefaults)
+  }
+
+  func applySavedCaptionStyle() {
+    guard
+      let style = CaptionStyleStore.customStyle(in: captionStyleDefaults)
+    else { return }
+    applyCaptionStyle(style)
+    CaptionStyleStore.selectCustom(in: captionStyleDefaults)
+  }
+
+  func saveCurrentCaptionStyle() {
+    guard
+      let item = overlays.first(where: { $0.kind == .caption })
+    else { return }
+    CaptionStyleStore.saveCustom(
+      CaptionStyle(item: item),
+      in: captionStyleDefaults
+    )
+    hasSavedCaptionStyle = true
+  }
+
+  func deleteSavedCaptionStyle() {
+    CaptionStyleStore.deleteCustom(in: captionStyleDefaults)
+    hasSavedCaptionStyle = false
+  }
+
+  private func applyCaptionStyle(_ style: CaptionStyle) {
+    let indices = overlays.indices.filter {
+      overlays[$0].kind == .caption
+    }
+    guard !indices.isEmpty else { return }
+    recordUndoCheckpoint()
+    for index in indices {
+      style.apply(to: &overlays[index])
+    }
+  }
+
+  func deleteSelectedOverlay() {
+    guard let selectedOverlayID else { return }
+    guard overlays.contains(where: { $0.id == selectedOverlayID }) else {
+      self.selectedOverlayID = nil
+      return
+    }
+    recordUndoCheckpoint()
+    overlays.removeAll { $0.id == selectedOverlayID }
+    self.selectedOverlayID = nil
+  }
+
+  func splitCaptionsIntoWords() {
+    let captions = overlays.filter { $0.kind == .caption }
+    guard !captions.isEmpty else { return }
+    recordUndoCheckpoint()
+    var replacements: [OverlayItem] = []
+    for caption in captions {
+      let words = caption.text?
+        .split(whereSeparator: \.isWhitespace)
+        .map(String.init) ?? []
+      guard words.count > 1 else {
+        replacements.append(caption)
+        continue
+      }
+      let weights = words.map { max(1, $0.count) }
+      let totalWeight = max(1, weights.reduce(0, +))
+      var cursor = caption.startTime
+      for (word, weight) in zip(words, weights) {
+        var item = caption
+        item.id = UUID()
+        item.text = word
+        item.startTime = cursor
+        item.duration = caption.duration * Double(weight) / Double(totalWeight)
+        cursor += item.duration
+        replacements.append(item)
+      }
+      if let lastIndex = replacements.indices.last {
+        replacements[lastIndex].duration =
+          caption.startTime + caption.duration
+          - replacements[lastIndex].startTime
+      }
+    }
+    overlays.removeAll { $0.kind == .caption }
+    overlays.append(contentsOf: replacements)
+    overlays.sort {
+      if $0.startTime == $1.startTime {
+        return $0.kind.rawValue < $1.kind.rawValue
+      }
+      return $0.startTime < $1.startTime
+    }
+    selectedOverlayID = replacements.first?.id
+    if let first = replacements.first {
+      seek(to: first.startTime)
+    }
   }
 
   func setOverlayStart(id: UUID, to requestedStart: Double) {
@@ -525,7 +699,11 @@ final class EditorProject: ObservableObject {
     setClipSelection(nextSelection.map { Set([$0]) } ?? [], primary: nextSelection)
     playhead = oldPlayhead - removedBeforePlayhead
     playhead = min(playhead, duration)
-    rebuildAfterEdit()
+    if clips.isEmpty {
+      clearPlaybackForEmptyProject()
+    } else {
+      rebuildAfterEdit()
+    }
   }
 
   func trimClip(id: UUID, edge: TrimEdge, by requestedAmount: Double) {
@@ -775,16 +953,86 @@ final class EditorProject: ObservableObject {
     }
   }
 
-  func rebuildPlayback() async throws {
-    let composition = try await CompositionBuilder.build(
-      clips: clips,
-      canvas: canvas,
-      scalingMode: scalingMode
-    )
-    let item = AVPlayerItem(asset: composition.asset)
-    item.videoComposition = composition.videoComposition
-    player.replaceCurrentItem(with: item)
-    seek(to: min(playhead, duration))
+  @discardableResult
+  func rebuildPlayback() async throws -> Bool {
+    let generationID = UUID()
+    playbackGenerationID = generationID
+    let processedAudio: ProcessedAudio?
+    if audio.normalizeLoudness {
+      processedAudio = try await AudioProcessingService.process(
+        clips: clips,
+        settings: audio
+      )
+    } else {
+      processedAudio = nil
+    }
+
+    do {
+      guard playbackGenerationID == generationID else {
+        if let processedAudio {
+          try? FileManager.default.removeItem(at: processedAudio.url)
+        }
+        return false
+      }
+      let composition = try await CompositionBuilder.build(
+        clips: clips,
+        canvas: canvas,
+        scalingMode: scalingMode,
+        replacementAudioURL: processedAudio?.url
+      )
+      guard playbackGenerationID == generationID else {
+        if let processedAudio {
+          try? FileManager.default.removeItem(at: processedAudio.url)
+        }
+        return false
+      }
+      let item = AVPlayerItem(asset: composition.asset)
+      item.videoComposition = composition.videoComposition
+      let previousPreviewAudioURL = previewAudioURL
+      previewAudioURL = processedAudio?.url
+      player.replaceCurrentItem(with: item)
+      seek(to: min(playhead, duration))
+      if let previousPreviewAudioURL,
+        previousPreviewAudioURL != previewAudioURL
+      {
+        try? FileManager.default.removeItem(at: previousPreviewAudioURL)
+      }
+      return true
+    } catch {
+      if let processedAudio {
+        try? FileManager.default.removeItem(at: processedAudio.url)
+      }
+      throw error
+    }
+  }
+
+  func setAudioNormalizationEnabled(_ enabled: Bool) {
+    guard enabled != audio.normalizeLoudness else { return }
+    resumePlaybackAfterAudioRebuild =
+      resumePlaybackAfterAudioRebuild
+      || player.timeControlStatus == .playing
+    player.pause()
+    recordUndoCheckpoint()
+    audio = AudioSettings(normalizeLoudness: enabled)
+    status = enabled
+      ? "Готовим нормализованный звук для предпросмотра…"
+      : "Возвращаем исходный звук…"
+    Task {
+      do {
+        guard try await rebuildPlayback() else { return }
+        if resumePlaybackAfterAudioRebuild {
+          player.play()
+        }
+        resumePlaybackAfterAudioRebuild = false
+        status = enabled
+          ? "Автонормализация включена"
+          : "Автонормализация выключена"
+      } catch {
+        resumePlaybackAfterAudioRebuild = false
+        lastError = error.localizedDescription
+        status = "Не удалось обновить звук предпросмотра"
+      }
+    }
   }
 
   func preparePlayback() async throws {
@@ -831,6 +1079,8 @@ final class EditorProject: ObservableObject {
       isDirty = false
       recoveryTask?.cancel()
       RecoveryService.clear()
+      lastError = nil
+      status = "Проект открыт"
       rebuildAfterEdit()
     } catch {
       if isAccessing {
@@ -843,6 +1093,12 @@ final class EditorProject: ObservableObject {
   private func stopAccessingProjectURL() {
     securityScopedProjectURL?.stopAccessingSecurityScopedResource()
     securityScopedProjectURL = nil
+  }
+
+  private func discardPreviewAudio() {
+    guard let previewAudioURL else { return }
+    try? FileManager.default.removeItem(at: previewAudioURL)
+    self.previewAudioURL = nil
   }
 
   private static func sanitizedOverlays(
@@ -947,6 +1203,18 @@ final class EditorProject: ObservableObject {
         status = "Не удалось обновить монтаж"
       }
     }
+  }
+
+  private func clearPlaybackForEmptyProject() {
+    playbackGenerationID = UUID()
+    waveformGenerationID = UUID()
+    player.pause()
+    player.replaceCurrentItem(with: nil)
+    discardPreviewAudio()
+    waveform = []
+    playhead = 0
+    timelineZoom = 1
+    status = "Добавьте видео, чтобы начать"
   }
 
   private func hydrateSourceDurations() async {

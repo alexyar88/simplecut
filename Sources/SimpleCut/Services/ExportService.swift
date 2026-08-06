@@ -123,15 +123,7 @@ enum ExportService {
       let layer: CALayer
       switch item.kind {
       case .text, .caption:
-        let text = CATextLayer()
-        text.string = item.text ?? ""
-        text.alignmentMode = .center
-        text.fontSize = item.fontSize * canvasSize.width / 1_080
-        text.foregroundColor = NSColor(hex: item.foregroundHex).cgColor
-        text.backgroundColor = NSColor(hex: item.backgroundHex).cgColor
-        text.cornerRadius = 14
-        text.contentsScale = 2
-        layer = text
+        layer = makeTextLayer(item, canvasSize: canvasSize)
       case .image:
         let image = item.imageURL.flatMap(NSImage.init(contentsOf:))
         let imageLayer = CALayer()
@@ -140,15 +132,10 @@ enum ExportService {
         layer = imageLayer
       }
 
-      let width = canvasSize.width * item.normalizedWidth
-      let height =
-        item.kind.isTextual
-        ? max(
-          item.fontSize * canvasSize.width / 1_080 * 1.8,
-          90 * canvasSize.width / 1_080
-        )
-        : width
-      layer.bounds = CGRect(x: 0, y: 0, width: width, height: height)
+      if item.kind == .image {
+        let width = canvasSize.width * item.normalizedWidth
+        layer.bounds = CGRect(x: 0, y: 0, width: width, height: width)
+      }
       layer.position = CGPoint(
         x: canvasSize.width * item.normalizedX,
         y: canvasSize.height * (1 - item.normalizedY)
@@ -158,23 +145,45 @@ enum ExportService {
         CGAffineTransform(rotationAngle: item.rotation * .pi / 180)
       )
 
-      layer.opacity = 0
       let visibility = CAKeyframeAnimation(keyPath: "opacity")
       let safeDuration = max(duration, 0.01)
-      let start = min(max(item.startTime / safeDuration, 0), 1)
-      let end = min(
-        max((item.startTime + item.duration) / safeDuration, start),
-        1
+      let startTime = min(max(item.startTime, 0), safeDuration)
+      let endTime = min(
+        max(item.startTime + item.duration, startTime),
+        safeDuration
       )
-      visibility.values = [0, item.opacity, item.opacity, 0]
-      visibility.keyTimes = [
-        0,
-        NSNumber(value: start),
-        NSNumber(value: end),
-        1,
-      ]
+      let fade = min(1.0 / 120, max(0.0001, item.duration / 4))
+      var points: [(Double, Double)] = []
+      if startTime <= 0 {
+        points.append((0, item.opacity))
+      } else {
+        points.append((0, 0))
+        points.append((max(0, startTime - fade), 0))
+        points.append((startTime, item.opacity))
+      }
+      if endTime >= safeDuration {
+        points.append((safeDuration, item.opacity))
+      } else {
+        points.append((max(startTime, endTime - fade), item.opacity))
+        points.append((endTime, 0))
+        points.append((safeDuration, 0))
+      }
+      let uniquePoints = points.reduce(into: [(Double, Double)]()) {
+        result,
+        point in
+        if result.last?.0 == point.0 {
+          result[result.count - 1] = point
+        } else {
+          result.append(point)
+        }
+      }
+      visibility.values = uniquePoints.map(\.1)
+      visibility.keyTimes = uniquePoints.map {
+        NSNumber(value: $0.0 / safeDuration)
+      }
       visibility.duration = safeDuration
       visibility.beginTime = AVCoreAnimationBeginTimeAtZero
+      visibility.fillMode = .both
       visibility.isRemovedOnCompletion = false
       layer.add(visibility, forKey: "visibility")
       parent.addSublayer(layer)
@@ -184,6 +193,19 @@ enum ExportService {
       postProcessingAsVideoLayer: video,
       in: parent
     )
+  }
+
+  private static func makeTextLayer(
+    _ item: OverlayItem,
+    canvasSize: CGSize
+  ) -> CALayer {
+    let rendered = CaptionRenderer.render(item: item, canvasSize: canvasSize)
+    let layer = CALayer()
+    layer.bounds = CGRect(origin: .zero, size: rendered?.size ?? .zero)
+    layer.contents = rendered?.image
+    layer.contentsGravity = .resize
+    layer.contentsScale = 1
+    return layer
   }
 
   private static func presetName(for quality: ExportQuality) -> String {
@@ -235,37 +257,5 @@ enum ExportError: LocalizedError {
     case .insufficientDiskSpace:
       "Недостаточно свободного места для экспорта"
     }
-  }
-}
-
-extension NSColor {
-  convenience init(hex: String) {
-    let value = hex.trimmingCharacters(
-      in: CharacterSet.alphanumerics.inverted
-    )
-    var number: UInt64 = 0
-    Scanner(string: value).scanHexInt64(&number)
-    let red: CGFloat
-    let green: CGFloat
-    let blue: CGFloat
-    let alpha: CGFloat
-    switch value.count {
-    case 8:
-      red = CGFloat((number >> 24) & 0xFF) / 255
-      green = CGFloat((number >> 16) & 0xFF) / 255
-      blue = CGFloat((number >> 8) & 0xFF) / 255
-      alpha = CGFloat(number & 0xFF) / 255
-    default:
-      red = CGFloat((number >> 16) & 0xFF) / 255
-      green = CGFloat((number >> 8) & 0xFF) / 255
-      blue = CGFloat(number & 0xFF) / 255
-      alpha = 1
-    }
-    self.init(
-      calibratedRed: red,
-      green: green,
-      blue: blue,
-      alpha: alpha
-    )
   }
 }

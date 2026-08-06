@@ -115,7 +115,7 @@ struct TimelineView: View {
           Image(systemName: "minus.magnifyingglass")
         }
         .buttonStyle(.plain)
-        .disabled(project.timelineZoom <= 1)
+        .disabled(project.clips.isEmpty || project.timelineZoom <= 1)
         .accessibilityLabel("Уменьшить масштаб")
         Slider(
           value: $project.timelineZoom,
@@ -130,13 +130,17 @@ struct TimelineView: View {
         .accessibilityAdjustableAction { direction in
           adjustZoom(by: direction == .increment ? 0.25 : -0.25)
         }
+        .disabled(project.clips.isEmpty)
         Button {
           adjustZoom(by: 0.5)
         } label: {
           Image(systemName: "plus.magnifyingglass")
         }
         .buttonStyle(.plain)
-        .disabled(project.timelineZoom >= maximumTimelineZoom)
+        .disabled(
+          project.clips.isEmpty
+            || project.timelineZoom >= maximumTimelineZoom
+        )
         .accessibilityLabel("Увеличить масштаб")
       }
       .help("Масштаб таймлайна")
@@ -157,14 +161,6 @@ struct TimelineView: View {
       RoundedRectangle(cornerRadius: 8)
         .fill(EditorTheme.canvas)
         .contentShape(Rectangle())
-        .gesture(
-          SpatialTapGesture()
-            .onEnded { value in
-              guard !isTrimming else { return }
-              focusTimeline()
-              project.clearClipSelection()
-            }
-        )
       splitSeparators(in: size)
       clipBoundaries(in: size)
       playhead(in: size)
@@ -177,7 +173,7 @@ struct TimelineView: View {
       SpatialTapGesture(coordinateSpace: .local)
         .onEnded { value in
           guard !isTrimming else { return }
-          seekFromTimeline(x: value.location.x, width: size.width)
+          selectClipAndSeek(x: value.location.x, width: size.width)
         }
     )
   }
@@ -338,6 +334,19 @@ struct TimelineView: View {
     focusTimeline()
     let ratio = min(1, max(0, x / max(width, 1)))
     project.seek(to: ratio * project.duration)
+  }
+
+  private func selectClipAndSeek(x: CGFloat, width: CGFloat) {
+    let ratio = min(1, max(0, x / max(width, 1)))
+    let time = ratio * project.duration
+    var cursor = 0.0
+    if let clip = project.clips.first(where: { clip in
+      cursor += clip.duration
+      return time <= cursor
+    }) {
+      selectClip(clip)
+    }
+    project.seek(to: time)
   }
 
   private func focusTimeline() {
@@ -711,7 +720,7 @@ struct TimelineView: View {
     .gesture(
       SpatialTapGesture(coordinateSpace: .local)
         .onEnded { value in
-          seekFromTimeline(x: value.location.x, width: trackWidth)
+          selectClipAndSeek(x: value.location.x, width: trackWidth)
         }
     )
     .help(
@@ -841,31 +850,32 @@ struct TimelineView: View {
           }
           .overlay {
             if project.selectedOverlayID == item.id {
-              HStack(spacing: 0) {
-                overlayTrimHandle(
-                  item: item,
-                  edge: .leading,
-                  pixelsPerSecond: pixelsPerSecond
-                )
-                Spacer(minLength: 0)
-                overlayTrimHandle(
-                  item: item,
-                  edge: .trailing,
-                  pixelsPerSecond: pixelsPerSecond
-                )
+              ZStack {
+                RoundedRectangle(cornerRadius: 5)
+                  .stroke(Color.white, lineWidth: 2)
+                  .shadow(color: Color.accentColor, radius: 3)
+                HStack(spacing: 0) {
+                  overlayTrimHandle(
+                    item: item,
+                    edge: .leading,
+                    pixelsPerSecond: pixelsPerSecond
+                  )
+                  Spacer(minLength: 0)
+                  overlayTrimHandle(
+                    item: item,
+                    edge: .trailing,
+                    pixelsPerSecond: pixelsPerSecond
+                  )
+                }
               }
             }
           }
           .frame(width: adjustedWidth, height: 28)
-          .offset(x: x + adjustment.offset)
           .contentShape(Rectangle().inset(by: -3))
-          .onTapGesture {
-            project.clearClipSelection()
-            project.selectedOverlayID = item.id
-          }
           .gesture(
-            DragGesture(minimumDistance: 3)
+            DragGesture(minimumDistance: 0)
               .onChanged { value in
+                guard abs(value.translation.width) >= 3 else { return }
                 activeOverlayID = item.id
                 activeOverlayEdge = nil
                 overlayDragOffset = value.translation.width
@@ -873,6 +883,14 @@ struct TimelineView: View {
                 project.selectedOverlayID = item.id
               }
               .onEnded { value in
+                if abs(value.translation.width) < 3,
+                  abs(value.translation.height) < 3
+                {
+                  focusTimeline()
+                  project.selectOverlay(id: item.id, seekToStart: true)
+                  resetOverlayGesture()
+                  return
+                }
                 let delta = clampedOverlayMove(
                   item: item,
                   requestedOffset: value.translation.width,
@@ -898,8 +916,8 @@ struct TimelineView: View {
           )
           .accessibilityAddTraits(.isButton)
           .accessibilityAction {
-            project.clearClipSelection()
-            project.selectedOverlayID = item.id
+            focusTimeline()
+            project.selectOverlay(id: item.id, seekToStart: true)
           }
           .accessibilityAction(named: "Сдвинуть на 0,1 секунды влево") {
             project.recordUndoCheckpoint()
@@ -909,6 +927,10 @@ struct TimelineView: View {
             project.recordUndoCheckpoint()
             project.moveOverlay(id: item.id, by: 0.1)
           }
+          .position(
+            x: x + adjustment.offset + adjustedWidth / 2,
+            y: 17
+          )
       }
     }
     .frame(height: 34)

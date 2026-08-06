@@ -6,6 +6,7 @@ struct EditorView: View {
   @Environment(\.openWindow) private var openWindow
   @EnvironmentObject private var project: EditorProject
   @State private var importer: Importer?
+  @State private var isImporterPresented = false
   @State private var timeObserver: Any?
   @State private var playbackKeyMonitor: Any?
   @State private var showingExportSettings = false
@@ -29,31 +30,39 @@ struct EditorView: View {
   }
 
   var body: some View {
-    VStack(spacing: 0) {
-      toolbar
-      Divider()
-      HSplitView {
-        VStack(spacing: 0) {
-          ZStack {
-            if project.clips.isEmpty {
-              emptyState
-            } else {
+    GeometryReader { window in
+      VStack(spacing: 0) {
+        toolbar
+        Divider()
+        HSplitView {
+          VStack(spacing: 0) {
+            ZStack {
               PreviewCanvas()
                 .padding(18)
+                .opacity(project.clips.isEmpty ? 0 : 1)
+                .allowsHitTesting(!project.clips.isEmpty)
+                .accessibilityHidden(project.clips.isEmpty)
+              emptyState
+                .opacity(project.clips.isEmpty ? 1 : 0)
+                .allowsHitTesting(project.clips.isEmpty)
+                .accessibilityHidden(!project.clips.isEmpty)
             }
-          }
-          if !project.clips.isEmpty {
             transportBar
+              .opacity(project.clips.isEmpty ? 0 : 1)
+              .allowsHitTesting(!project.clips.isEmpty)
+              .accessibilityHidden(project.clips.isEmpty)
             Divider()
+              .opacity(project.clips.isEmpty ? 0 : 1)
+            Divider()
+            TimelineView()
+              .frame(
+                height: project.overlays.isEmpty ? 222 : 264
+              )
           }
-          Divider()
-          TimelineView()
-            .frame(
-              height: project.overlays.isEmpty ? 222 : 264
-            )
+          InspectorView()
         }
-        InspectorView()
       }
+      .frame(width: window.size.width, height: window.size.height)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .disabled(project.isBusy)
@@ -119,14 +128,13 @@ struct EditorView: View {
       Text("Сохраните текущий проект перед продолжением, чтобы не потерять изменения.")
     }
     .fileImporter(
-      isPresented: Binding(
-        get: { importer != nil },
-        set: { if !$0 { importer = nil } }
-      ),
+      isPresented: $isImporterPresented,
       allowedContentTypes: allowedTypes,
       allowsMultipleSelection: false
     ) { result in
-      handleImport(result)
+      let completedImporter = importer
+      importer = nil
+      handleImport(result, as: completedImporter)
     }
     .sheet(
       isPresented: $showingExportSettings,
@@ -174,25 +182,31 @@ struct EditorView: View {
       }
     }
     .onReceive(NotificationCenter.default.publisher(for: .simpleCutSave)) { _ in
+      guard !project.isBusy else { return }
       saveProject()
     }
     .onReceive(NotificationCenter.default.publisher(for: .simpleCutNew)) { _ in
+      guard !project.isBusy else { return }
       requestProjectAction(.new)
     }
     .onReceive(NotificationCenter.default.publisher(for: .simpleCutOpen)) { _ in
+      guard !project.isBusy else { return }
       requestProjectAction(.open)
     }
     .onReceive(NotificationCenter.default.publisher(for: .simpleCutSaveAs)) { _ in
+      guard !project.isBusy else { return }
       saveProject(saveAs: true)
     }
     .onReceive(NotificationCenter.default.publisher(for: .simpleCutImport)) { _ in
-      importer = .video
+      guard !project.isBusy else { return }
+      presentImporter(.video)
     }
     .onReceive(NotificationCenter.default.publisher(for: .simpleCutExport)) { _ in
       guard !project.clips.isEmpty, !project.isBusy else { return }
       showingExportSettings = true
     }
     .onOpenURL { url in
+      guard !project.isBusy else { return }
       requestProjectAction(.openURL(url))
     }
   }
@@ -210,12 +224,12 @@ struct EditorView: View {
 
       Menu {
         Button {
-          importer = .video
+          presentImporter(.video)
         } label: {
           Label("Видео…", systemImage: "film")
         }
         Button {
-          importer = .image
+          presentImporter(.image)
         } label: {
           Label("Изображение…", systemImage: "photo")
         }
@@ -261,7 +275,7 @@ struct EditorView: View {
       .help("Удалить выбранный фрагмент (⌫)")
       .accessibilityLabel("Удалить выбранный фрагмент")
       Spacer()
-      Text(project.name)
+      Text(project.displayName)
         .font(.headline)
         .lineLimit(1)
       if project.isDirty {
@@ -275,7 +289,13 @@ struct EditorView: View {
         Button("Новый проект") { requestProjectAction(.new) }
         Divider()
         Button("Открыть проект…") { requestProjectAction(.open) }
-        Button("Сохранить проект…") { saveProject() }
+        Button(
+          project.currentProjectURL == nil
+            ? "Сохранить проект…"
+            : "Сохранить проект"
+        ) {
+          saveProject()
+        }
         Button("Сохранить как…") { saveProject(saveAs: true) }
       } label: {
         Label("Проект", systemImage: "ellipsis.circle")
@@ -306,7 +326,7 @@ struct EditorView: View {
       }
       HStack(spacing: 10) {
         Button {
-          importer = .video
+          presentImporter(.video)
         } label: {
           Label("Импортировать", systemImage: "square.and.arrow.down")
         }
@@ -356,26 +376,43 @@ struct EditorView: View {
   private var allowedTypes: [UTType] {
     switch importer {
     case .image: [.image]
-    case .project: [.simpleCutProject, .json]
+    case .project:
+      // `.package` keeps projects selectable if Launch Services has not yet
+      // refreshed the app's exported UTType after an update.
+      [.simpleCutProject, .package, .json]
     default: [.movie, .mpeg4Movie, .quickTimeMovie]
     }
   }
 
-  private func handleImport(_ result: Result<[URL], Error>) {
+  private func presentImporter(_ kind: Importer) {
+    guard !project.isBusy else { return }
+    importer = kind
+    isImporterPresented = true
+  }
+
+  private func handleImport(
+    _ result: Result<[URL], Error>,
+    as completedImporter: Importer?
+  ) {
     do {
       guard let url = try result.get().first else { return }
-      switch importer {
+      switch completedImporter {
       case .image:
         project.addImage(url, securityScoped: true)
       case .project:
+        guard ProjectPackageService.canOpen(url) else {
+          throw ProjectPackageError.unsupportedFileType
+        }
         try project.loadProject(from: url, securityScoped: true)
-      default:
+      case .video:
         project.importVideo(url, securityScoped: true)
+      case nil:
+        return
       }
     } catch {
+      if (error as NSError).code == NSUserCancelledError { return }
       project.lastError = error.localizedDescription
     }
-    importer = nil
   }
 
   private func installTimeObserver() {
@@ -438,11 +475,16 @@ struct EditorView: View {
         project.seek(by: step)
         return nil
       case 51, 117:
+        if project.selectedOverlayID != nil {
+          project.deleteSelectedOverlay()
+          return nil
+        }
         guard !project.selectedClipIDs.isEmpty else { return event }
         project.deleteSelectedClips()
         return nil
       case 53:
         project.clearClipSelection()
+        project.selectedOverlayID = nil
         return nil
       default:
         return event
@@ -451,6 +493,7 @@ struct EditorView: View {
   }
 
   private func requestProjectAction(_ action: PendingProjectAction) {
+    guard !project.isBusy else { return }
     pendingProjectAction = action
     if project.isDirty {
       showingUnsavedChangesAlert = true
@@ -466,7 +509,7 @@ struct EditorView: View {
     case .new:
       project.reset()
     case .open:
-      importer = .project
+      presentImporter(.project)
     case .openURL(let url):
       do {
         try project.loadProject(from: url, securityScoped: true)
@@ -492,7 +535,8 @@ struct EditorView: View {
     }
     let panel = NSSavePanel()
     panel.allowedContentTypes = [.simpleCutProject]
-    panel.nameFieldStringValue = "\(project.name).simplecut"
+    let baseName = safeProjectName(fallback: "Без названия")
+    panel.nameFieldStringValue = "\(baseName).simplecut"
     panel.isExtensionHidden = false
     panel.canCreateDirectories = true
     DispatchQueue.main.async {
@@ -515,8 +559,7 @@ struct EditorView: View {
   private func presentExportPanel(settings: ExportSettings) {
     let panel = NSSavePanel()
     panel.allowedContentTypes = [.mpeg4Movie]
-    let trimmedName = project.name.trimmingCharacters(in: .whitespacesAndNewlines)
-    let baseName = trimmedName.isEmpty ? "Видео" : trimmedName
+    let baseName = safeProjectName(fallback: "Видео")
     panel.nameFieldStringValue = "\(baseName).mp4"
     panel.isExtensionHidden = false
     panel.canCreateDirectories = true
@@ -567,6 +610,11 @@ struct EditorView: View {
         project.status = "Ошибка экспорта"
       }
     }
+  }
+
+  private func safeProjectName(fallback: String) -> String {
+    let trimmed = project.name.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? fallback : trimmed
   }
 }
 
