@@ -5,6 +5,21 @@ import XCTest
 @testable import SimpleCut
 
 final class MediaPipelineTests: XCTestCase {
+  func testTechnicalPreRollIsRemovedFromFinishedRecording() async throws {
+    let source = FileManager.default.temporaryDirectory
+      .appendingPathComponent("SimpleCut-PreRoll-\(UUID().uuidString).mov")
+    defer { try? FileManager.default.removeItem(at: source) }
+
+    try await makeVideo(at: source, duration: 3)
+    try await PreRollRecorder.removePreRoll(
+      from: source,
+      startingAt: CMTime(seconds: 1, preferredTimescale: 600)
+    )
+
+    let duration = try await AVURLAsset(url: source).load(.duration).seconds
+    XCTAssertEqual(duration, 2, accuracy: 0.08)
+  }
+
   func testRecordedVideoIsAddedWithoutSecondCopy() async throws {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("SimpleCutRecording-\(UUID().uuidString)")

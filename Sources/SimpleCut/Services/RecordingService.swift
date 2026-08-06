@@ -175,22 +175,16 @@ final class RecordingService: NSObject, ObservableObject {
   }
 
   let session = AVCaptureSession()
-  private let movieOutput = AVCaptureMovieFileOutput()
+  private let videoDataOutput = AVCaptureVideoDataOutput()
   private let audioLevelOutput = AVCaptureAudioDataOutput()
-  private let audioMeter = AudioLevelMonitor()
   private let sessionQueue = DispatchQueue(
     label: "app.simplecut.capture-session"
-  )
-  private let audioMeterQueue = DispatchQueue(
-    label: "app.simplecut.audio-meter",
-    qos: .userInteractive
   )
   private var completion: ((URL) -> Void)?
   private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
   private var countdownTask: Task<Void, Never>?
-  private var meteringTask: Task<Void, Never>?
-  private var recordedDurationOffset = 0.0
   private var shouldDiscardRecording = false
+  private var preRollRecorder: PreRollRecorder!
 
   private enum Defaults {
     static let cameraID = "recording.cameraID"
@@ -213,6 +207,33 @@ final class RecordingService: NSObject, ObservableObject {
 
   override init() {
     super.init()
+    preRollRecorder = PreRollRecorder(callbacks: .init(
+      didUpdateLevel: { [weak self] level in
+        Task { @MainActor [weak self] in
+          self?.microphoneLevel = Double(level)
+        }
+      },
+      didStart: { [weak self] in
+        Task { @MainActor [weak self] in
+          self?.handlePreRollStarted()
+        }
+      },
+      didUpdateDuration: { [weak self] duration in
+        Task { @MainActor [weak self] in
+          self?.recordingDuration = duration
+        }
+      },
+      didFinish: { [weak self] url in
+        Task { @MainActor [weak self] in
+          self?.finishRecording(at: url)
+        }
+      },
+      didFail: { [weak self] message in
+        Task { @MainActor [weak self] in
+          self?.failRecording(message: message)
+        }
+      }
+    ))
     selectedCameraID = UserDefaults.standard.string(forKey: Defaults.cameraID)
     selectedMicrophoneID = UserDefaults.standard.string(
       forKey: Defaults.microphoneID
@@ -235,11 +256,6 @@ final class RecordingService: NSObject, ObservableObject {
       frameRate = savedFrameRate
     }
     isMirrored = UserDefaults.standard.bool(forKey: Defaults.isMirrored)
-    audioMeter.onLevel = { [weak self] level in
-      Task { @MainActor [weak self] in
-        self?.microphoneLevel = Double(level)
-      }
-    }
     refreshDevices()
   }
 
@@ -285,7 +301,6 @@ final class RecordingService: NSObject, ObservableObject {
         continuation.resume()
       }
     }
-    startMetering()
   }
 
   func stopPreview() {
@@ -297,8 +312,7 @@ final class RecordingService: NSObject, ObservableObject {
   func stopPreviewAndWait() async {
     cancelCountdown()
     guard !isRecording, !isStartingRecording else { return }
-    meteringTask?.cancel()
-    meteringTask = nil
+    preRollRecorder.resetBuffer()
     microphoneLevel = 0
     let captureSession = session
     guard captureSession.isRunning else { return }
@@ -314,13 +328,15 @@ final class RecordingService: NSObject, ObservableObject {
 
   func reconfigure() {
     guard !isRecording, !isStartingRecording else { return }
+    preRollRecorder.resetBuffer()
     configureSession()
   }
 
   func applyVideoSettings() {
     guard !isRecording, !isStartingRecording,
-      let connection = movieOutput.connection(with: .video)
+      let connection = videoDataOutput.connection(with: .video)
     else { return }
+    preRollRecorder.resetBuffer()
     let automatic =
       rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 0
     let angle = captureRotation.connectionAngle(
@@ -358,7 +374,7 @@ final class RecordingService: NSObject, ObservableObject {
     countdown seconds: Int = 3,
     completion: @escaping (URL) -> Void
   ) {
-    guard !movieOutput.isRecording, !isStartingRecording, countdown == nil else {
+    guard !isRecording, !isStartingRecording, countdown == nil else {
       return
     }
     self.completion = completion
@@ -391,8 +407,10 @@ final class RecordingService: NSObject, ObservableObject {
   }
 
   private func beginRecording() {
-    guard !movieOutput.isRecording else { return }
-    applyVideoSettings()
+    guard !isRecording, !isStartingRecording else { return }
+    let requestedStartTime = session.synchronizationClock.map(
+      CMClockGetTime
+    ) ?? .invalid
     do {
       let destination = try MediaLibrary.recordingDestination(
         in: outputDirectory
@@ -400,9 +418,10 @@ final class RecordingService: NSObject, ObservableObject {
       isStartingRecording = true
       shouldDiscardRecording = false
       recordingDuration = 0
-      recordedDurationOffset = 0
-      movieOutput.startRecording(to: destination, recordingDelegate: self)
-      startMetering()
+      preRollRecorder.start(
+        to: destination,
+        requestedStartTime: requestedStartTime
+      )
     } catch {
       isStartingRecording = false
       completion = nil
@@ -411,39 +430,22 @@ final class RecordingService: NSObject, ObservableObject {
   }
 
   func stopRecording() {
-    if movieOutput.isRecording {
-      movieOutput.stopRecording()
-    }
+    guard isRecording else { return }
+    preRollRecorder.stop()
   }
 
   func cancelRecordingStart() {
     guard isStartingRecording else { return }
     shouldDiscardRecording = true
     completion = nil
-    movieOutput.stopRecording()
+    preRollRecorder.cancel()
     Task { [weak self] in
       try? await Task.sleep(for: .seconds(1))
-      guard let self, shouldDiscardRecording, !movieOutput.isRecording else {
+      guard let self, shouldDiscardRecording, !isRecording else {
         return
       }
       isStartingRecording = false
       shouldDiscardRecording = false
-    }
-  }
-
-  private func startMetering() {
-    guard meteringTask == nil else { return }
-    meteringTask = Task { [weak self] in
-      while !Task.isCancelled {
-        guard let self else { return }
-        if isRecording {
-          let seconds = CMTimeGetSeconds(movieOutput.recordedDuration)
-          recordingDuration = seconds.isFinite
-            ? max(0, seconds - recordedDurationOffset)
-            : 0
-        }
-        try? await Task.sleep(for: .milliseconds(33))
-      }
     }
   }
 
@@ -476,10 +478,18 @@ final class RecordingService: NSObject, ObservableObject {
       session.addInput(input)
     }
 
-    if !session.outputs.contains(where: { $0 === movieOutput }),
-      session.canAddOutput(movieOutput)
+    if !session.outputs.contains(where: { $0 === videoDataOutput }),
+      session.canAddOutput(videoDataOutput)
     {
-      session.addOutput(movieOutput)
+      videoDataOutput.alwaysDiscardsLateVideoFrames = false
+      videoDataOutput.videoSettings = [
+        AVVideoCodecKey: AVVideoCodecType.h264
+      ]
+      session.addOutput(videoDataOutput)
+      videoDataOutput.setSampleBufferDelegate(
+        preRollRecorder,
+        queue: preRollRecorder.queue
+      )
     }
     if !session.outputs.contains(where: { $0 === audioLevelOutput }),
       session.canAddOutput(audioLevelOutput)
@@ -493,8 +503,8 @@ final class RecordingService: NSObject, ObservableObject {
       ]
       session.addOutput(audioLevelOutput)
       audioLevelOutput.setSampleBufferDelegate(
-        audioMeter,
-        queue: audioMeterQueue
+        preRollRecorder,
+        queue: preRollRecorder.queue
       )
     }
     applyVideoSettings()
@@ -525,97 +535,40 @@ final class RecordingService: NSObject, ObservableObject {
     default: return .none
     }
   }
-}
 
-private final class AudioLevelMonitor:
-  NSObject,
-  AVCaptureAudioDataOutputSampleBufferDelegate,
-  @unchecked Sendable
-{
-  var onLevel: (@Sendable (Float) -> Void)?
+  private func finishRecording(at url: URL) {
+    isRecording = false
+    isStartingRecording = false
+    recordingDuration = 0
+    if shouldDiscardRecording {
+      try? FileManager.default.removeItem(at: url)
+    } else {
+      completion?(url)
+    }
+    shouldDiscardRecording = false
+    countdownTask = nil
+    completion = nil
+  }
 
-  func captureOutput(
-    _ output: AVCaptureOutput,
-    didOutput sampleBuffer: CMSampleBuffer,
-    from connection: AVCaptureConnection
-  ) {
-    guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+  private func handlePreRollStarted() {
+    if shouldDiscardRecording {
+      preRollRecorder.cancel()
+      isStartingRecording = false
       return
     }
-    let length = CMBlockBufferGetDataLength(blockBuffer)
-    guard length > 1 else { return }
-    var data = Data(count: length)
-    let status = data.withUnsafeMutableBytes { bytes in
-      guard let baseAddress = bytes.baseAddress else { return kCMBlockBufferBadCustomBlockSourceErr }
-      return CMBlockBufferCopyDataBytes(
-        blockBuffer,
-        atOffset: 0,
-        dataLength: length,
-        destination: baseAddress
-      )
-    }
-    guard status == kCMBlockBufferNoErr else { return }
-
-    let rms: Float = data.withUnsafeBytes { bytes in
-      let samples = bytes.bindMemory(to: Int16.self)
-      guard !samples.isEmpty else { return 0 }
-      var sum: Double = 0
-      for sample in samples {
-        let normalized = Double(sample) / Double(Int16.max)
-        sum += normalized * normalized
-      }
-      return Float(sqrt(sum / Double(samples.count)))
-    }
-    let decibels = rms > 0 ? 20 * log10(rms) : -60
-    let normalized = min(1, max(0, (decibels + 52) / 52))
-    let gated = normalized < 0.12 ? 0 : normalized
-    let stepped = (gated * 24).rounded() / 24
-    onLevel?(stepped)
-  }
-}
-
-extension RecordingService: AVCaptureFileOutputRecordingDelegate {
-  nonisolated func fileOutput(
-    _ output: AVCaptureFileOutput,
-    didStartRecordingTo outputFileURL: URL,
-    from connections: [AVCaptureConnection]
-  ) {
-    Task { @MainActor in
-      if shouldDiscardRecording {
-        output.stopRecording()
-        isStartingRecording = false
-        return
-      }
-      let seconds = CMTimeGetSeconds(output.recordedDuration)
-      recordedDurationOffset = seconds.isFinite ? max(0, seconds) : 0
-      recordingDuration = 0
-      isStartingRecording = false
-      isRecording = true
-    }
+    recordingDuration = 0
+    isStartingRecording = false
+    isRecording = true
   }
 
-  nonisolated func fileOutput(
-    _ output: AVCaptureFileOutput,
-    didFinishRecordingTo outputFileURL: URL,
-    from connections: [AVCaptureConnection],
-    error: (any Error)?
-  ) {
-    Task { @MainActor in
-      isRecording = false
-      isStartingRecording = false
-      recordingDuration = 0
-      recordedDurationOffset = 0
-      if shouldDiscardRecording {
-        try? FileManager.default.removeItem(at: outputFileURL)
-      } else if let error {
-        errorMessage = error.localizedDescription
-      } else {
-        completion?(outputFileURL)
-      }
-      shouldDiscardRecording = false
-      countdownTask = nil
-      completion = nil
-    }
+  private func failRecording(message: String) {
+    isRecording = false
+    isStartingRecording = false
+    recordingDuration = 0
+    shouldDiscardRecording = false
+    countdownTask = nil
+    completion = nil
+    errorMessage = message
   }
 }
 

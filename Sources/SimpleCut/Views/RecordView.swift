@@ -173,7 +173,7 @@ struct RecordView: View {
       wordsPerMinute: teleprompterSpeed,
       backgroundOpacity: teleprompterBackgroundOpacity,
       isMirrored: teleprompterMirrored,
-      isRunning: recorder.isRecording || recorder.isStartingRecording,
+      isRunning: recorder.isRecording,
       startedAt: teleprompterStartedAt
     )
     .accessibilityHidden(true)
@@ -370,7 +370,7 @@ struct RecordView: View {
       .buttonStyle(.borderedProminent)
       .controlSize(.large)
       .tint(
-        recorder.isRecording || recorder.isStartingRecording
+        recorder.isRecording
           ? .red
           : .accentColor
       )
@@ -513,7 +513,7 @@ struct RecordView: View {
   }
 
   private func updateTeleprompterStart() {
-    let active = recorder.isRecording || recorder.isStartingRecording
+    let active = recorder.isRecording
     if active, teleprompterStartedAt == nil {
       teleprompterStartedAt = Date()
     } else if !active {
@@ -541,7 +541,7 @@ struct RecordView: View {
     if recorder.isRecording {
       return "Идёт запись · \(recorder.recordingDuration.timestamp)"
     }
-    if recorder.isStartingRecording { return "Идёт запись · 00:00" }
+    if recorder.isStartingRecording { return "Запуск записи…" }
     if recorder.countdown != nil { return "Приготовьтесь" }
     if recorder.cameras.isEmpty || recorder.microphones.isEmpty {
       return "Нужно выбрать устройства"
@@ -550,8 +550,11 @@ struct RecordView: View {
   }
 
   private var statusDetail: String {
-    if recorder.isRecording || recorder.isStartingRecording {
+    if recorder.isRecording {
       return "Клип записывается в выбранную папку"
+    }
+    if recorder.isStartingRecording {
+      return "Сохраняем клип точно с момента запуска"
     }
     if recorder.cameras.isEmpty { return "Камера не найдена" }
     if recorder.microphones.isEmpty { return "Микрофон не найден" }
@@ -559,7 +562,8 @@ struct RecordView: View {
   }
 
   private var statusColor: Color {
-    if recorder.isRecording || recorder.isStartingRecording { return .red }
+    if recorder.isRecording { return .red }
+    if recorder.isStartingRecording { return .orange }
     if recorder.countdown != nil { return .orange }
     if recorder.cameras.isEmpty || recorder.microphones.isEmpty { return .orange }
     return .green
