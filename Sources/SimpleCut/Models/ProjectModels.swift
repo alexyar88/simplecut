@@ -161,13 +161,33 @@ struct ExportSettings: Equatable {
   }
 }
 
-enum OverlayKind: String, Codable {
+enum OverlayKind: String, Codable, CaseIterable {
   case text
   case image
   case caption
 
   var isTextual: Bool {
     self != .image
+  }
+
+  var compositingRank: Int {
+    switch self {
+    case .image: 0
+    case .caption: 1
+    case .text: 2
+    }
+  }
+
+  static let timelineOrder: [OverlayKind] = [
+    .text,
+    .caption,
+    .image,
+  ]
+
+  static func timelineKinds(for overlays: [OverlayItem]) -> [OverlayKind] {
+    timelineOrder.filter { kind in
+      overlays.contains { $0.kind == kind }
+    }
   }
 }
 
@@ -185,6 +205,30 @@ enum CaptionFontWeight: String, Codable, CaseIterable, Identifiable {
     case .semibold: "Полужирный"
     case .bold: "Жирный"
     case .heavy: "Очень жирный"
+    }
+  }
+}
+
+enum OverlayTextAlignment: String, Codable, CaseIterable, Identifiable {
+  case left
+  case center
+  case right
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .left: "По левому краю"
+    case .center: "По центру"
+    case .right: "По правому краю"
+    }
+  }
+
+  var systemImage: String {
+    switch self {
+    case .left: "text.alignleft"
+    case .center: "text.aligncenter"
+    case .right: "text.alignright"
     }
   }
 }
@@ -249,6 +293,7 @@ struct OverlayItem: Identifiable, Codable, Equatable {
   var fontSize: Double = 64
   var fontName: String = "Helvetica Neue"
   var fontWeight: CaptionFontWeight = .semibold
+  var textAlignment: OverlayTextAlignment = .center
   var foregroundHex: String = "#FFFFFF"
   var backgroundHex: String = "#00000099"
   var strokeHex: String = "#000000FF"
@@ -259,7 +304,7 @@ struct OverlayItem: Identifiable, Codable, Equatable {
   enum CodingKeys: String, CodingKey {
     case id, kind, startTime, duration, normalizedX, normalizedY
     case normalizedWidth, rotation, opacity, text, imageURL, fontSize
-    case fontName, fontWeight, foregroundHex, backgroundHex
+    case fontName, fontWeight, textAlignment, foregroundHex, backgroundHex
     case strokeHex, strokeWidth, textPadding, cornerRadius
   }
 
@@ -278,6 +323,7 @@ struct OverlayItem: Identifiable, Codable, Equatable {
     fontSize: Double = 64,
     fontName: String = "Helvetica Neue",
     fontWeight: CaptionFontWeight = .semibold,
+    textAlignment: OverlayTextAlignment = .center,
     foregroundHex: String = "#FFFFFF",
     backgroundHex: String = "#00000099",
     strokeHex: String = "#000000FF",
@@ -299,6 +345,7 @@ struct OverlayItem: Identifiable, Codable, Equatable {
     self.fontSize = fontSize
     self.fontName = fontName
     self.fontWeight = fontWeight
+    self.textAlignment = textAlignment
     self.foregroundHex = foregroundHex
     self.backgroundHex = backgroundHex
     self.strokeHex = strokeHex
@@ -328,6 +375,11 @@ struct OverlayItem: Identifiable, Codable, Equatable {
     fontWeight =
       try values.decodeIfPresent(CaptionFontWeight.self, forKey: .fontWeight)
       ?? .semibold
+    textAlignment =
+      try values.decodeIfPresent(
+        OverlayTextAlignment.self,
+        forKey: .textAlignment
+      ) ?? .center
     foregroundHex =
       try values.decodeIfPresent(String.self, forKey: .foregroundHex)
       ?? "#FFFFFF"
@@ -343,6 +395,20 @@ struct OverlayItem: Identifiable, Codable, Equatable {
       try values.decodeIfPresent(Double.self, forKey: .textPadding) ?? 12
     cornerRadius =
       try values.decodeIfPresent(Double.self, forKey: .cornerRadius) ?? 8
+  }
+}
+
+extension Array where Element == OverlayItem {
+  var inCompositingOrder: [OverlayItem] {
+    enumerated()
+      .sorted { lhs, rhs in
+        let lhsRank = lhs.element.kind.compositingRank
+        let rhsRank = rhs.element.kind.compositingRank
+        return lhsRank == rhsRank
+          ? lhs.offset < rhs.offset
+          : lhsRank < rhsRank
+      }
+      .map(\.element)
   }
 }
 
@@ -397,12 +463,19 @@ struct CaptionStyle: Codable, Equatable {
   var fontSize = 58.0
   var fontName = "Helvetica Neue"
   var fontWeight = CaptionFontWeight.semibold
+  var textAlignment = OverlayTextAlignment.center
   var foregroundHex = "#FFFFFFFF"
   var backgroundHex = "#000000B3"
   var strokeHex = "#000000FF"
   var strokeWidth = 0.0
   var textPadding = 12.0
   var cornerRadius = 8.0
+
+  enum CodingKeys: String, CodingKey {
+    case normalizedX, normalizedY, normalizedWidth, fontSize, fontName
+    case fontWeight, textAlignment, foregroundHex, backgroundHex
+    case strokeHex, strokeWidth, textPadding, cornerRadius
+  }
 
   init(
     normalizedX: Double = 0.5,
@@ -411,6 +484,7 @@ struct CaptionStyle: Codable, Equatable {
     fontSize: Double = 58,
     fontName: String = "Helvetica Neue",
     fontWeight: CaptionFontWeight = .semibold,
+    textAlignment: OverlayTextAlignment = .center,
     foregroundHex: String = "#FFFFFFFF",
     backgroundHex: String = "#000000B3",
     strokeHex: String = "#000000FF",
@@ -424,12 +498,51 @@ struct CaptionStyle: Codable, Equatable {
     self.fontSize = fontSize
     self.fontName = fontName
     self.fontWeight = fontWeight
+    self.textAlignment = textAlignment
     self.foregroundHex = foregroundHex
     self.backgroundHex = backgroundHex
     self.strokeHex = strokeHex
     self.strokeWidth = strokeWidth
     self.textPadding = textPadding
     self.cornerRadius = cornerRadius
+  }
+
+  init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    normalizedX =
+      try values.decodeIfPresent(Double.self, forKey: .normalizedX) ?? 0.5
+    normalizedY =
+      try values.decodeIfPresent(Double.self, forKey: .normalizedY) ?? 0.84
+    normalizedWidth =
+      try values.decodeIfPresent(Double.self, forKey: .normalizedWidth) ?? 0.82
+    fontSize =
+      try values.decodeIfPresent(Double.self, forKey: .fontSize) ?? 58
+    fontName =
+      try values.decodeIfPresent(String.self, forKey: .fontName)
+      ?? "Helvetica Neue"
+    fontWeight =
+      try values.decodeIfPresent(CaptionFontWeight.self, forKey: .fontWeight)
+      ?? .semibold
+    textAlignment =
+      try values.decodeIfPresent(
+        OverlayTextAlignment.self,
+        forKey: .textAlignment
+      ) ?? .center
+    foregroundHex =
+      try values.decodeIfPresent(String.self, forKey: .foregroundHex)
+      ?? "#FFFFFFFF"
+    backgroundHex =
+      try values.decodeIfPresent(String.self, forKey: .backgroundHex)
+      ?? "#000000B3"
+    strokeHex =
+      try values.decodeIfPresent(String.self, forKey: .strokeHex)
+      ?? "#000000FF"
+    strokeWidth =
+      try values.decodeIfPresent(Double.self, forKey: .strokeWidth) ?? 0
+    textPadding =
+      try values.decodeIfPresent(Double.self, forKey: .textPadding) ?? 12
+    cornerRadius =
+      try values.decodeIfPresent(Double.self, forKey: .cornerRadius) ?? 8
   }
 
   init(item: OverlayItem) {
@@ -439,6 +552,7 @@ struct CaptionStyle: Codable, Equatable {
     fontSize = item.fontSize
     fontName = item.fontName
     fontWeight = item.fontWeight
+    textAlignment = item.textAlignment
     foregroundHex = item.foregroundHex
     backgroundHex = item.backgroundHex
     strokeHex = item.strokeHex
@@ -454,6 +568,7 @@ struct CaptionStyle: Codable, Equatable {
     item.fontSize = fontSize
     item.fontName = fontName
     item.fontWeight = fontWeight
+    item.textAlignment = textAlignment
     item.foregroundHex = foregroundHex
     item.backgroundHex = backgroundHex
     item.strokeHex = strokeHex

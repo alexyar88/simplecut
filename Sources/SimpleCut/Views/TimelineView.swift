@@ -40,12 +40,6 @@ struct TimelineView: View {
           .frame(height: 104)
         RoundedRectangle(cornerRadius: 7)
           .fill(EditorTheme.canvas)
-          .overlay(alignment: .leading) {
-            Image(systemName: "waveform")
-              .font(.caption2)
-              .foregroundStyle(.white.opacity(0.35))
-              .padding(5)
-          }
           .frame(height: 38)
       }
       .frame(height: 150, alignment: .top)
@@ -55,7 +49,8 @@ struct TimelineView: View {
   }
 
   private var timelineContent: some View {
-    VStack(spacing: 8) {
+    let overlayKinds = OverlayKind.timelineKinds(for: project.overlays)
+    return VStack(spacing: 8) {
       timeRuler
       GeometryReader { viewport in
         let contentWidth = max(
@@ -64,10 +59,10 @@ struct TimelineView: View {
         )
         ScrollView(.horizontal) {
           VStack(spacing: 8) {
-            timelineTrack(in: CGSize(width: contentWidth, height: 104))
-            if !project.overlays.isEmpty {
-              overlayTrack(width: contentWidth)
+            ForEach(overlayKinds, id: \.self) { kind in
+              overlayTrack(kind: kind, width: contentWidth)
             }
+            timelineTrack(in: CGSize(width: contentWidth, height: 104))
             audioTrack(width: contentWidth)
           }
           .frame(width: contentWidth)
@@ -91,7 +86,7 @@ struct TimelineView: View {
             }
         )
       }
-      .frame(height: project.overlays.isEmpty ? 150 : 192)
+      .frame(height: 150 + CGFloat(overlayKinds.count) * 42)
     }
   }
 
@@ -699,12 +694,6 @@ struct TimelineView: View {
       }
       .padding(.horizontal, 5)
       audioSplitSeparators(width: trackWidth)
-      Image(systemName: "waveform")
-        .font(.caption2)
-        .foregroundStyle(.white.opacity(0.8))
-        .padding(5)
-        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 5))
-        .padding(.leading, 5)
       let x =
         project.duration > 0
         ? trackWidth * project.playhead / project.duration
@@ -816,11 +805,14 @@ struct TimelineView: View {
     .accessibilityHidden(true)
   }
 
-  private func overlayTrack(width trackWidth: CGFloat) -> some View {
+  private func overlayTrack(
+    kind: OverlayKind,
+    width trackWidth: CGFloat
+  ) -> some View {
     ZStack(alignment: .leading) {
       RoundedRectangle(cornerRadius: 6)
-        .fill(Color.purple.opacity(0.08))
-      ForEach(project.overlays) { item in
+        .fill(trackColor(for: kind).opacity(0.08))
+      ForEach(project.overlays.filter { $0.kind == kind }) { item in
         let pixelsPerSecond = trackWidth / max(project.duration, 0.01)
         let width =
           project.duration > 0
@@ -873,7 +865,10 @@ struct TimelineView: View {
           .frame(width: adjustedWidth, height: 28)
           .contentShape(Rectangle().inset(by: -3))
           .gesture(
-            DragGesture(minimumDistance: 0)
+            DragGesture(
+              minimumDistance: 0,
+              coordinateSpace: .global
+            )
               .onChanged { value in
                 guard abs(value.translation.width) >= 3 else { return }
                 activeOverlayID = item.id
@@ -934,6 +929,24 @@ struct TimelineView: View {
       }
     }
     .frame(height: 34)
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel(trackTitle(for: kind))
+  }
+
+  private func trackColor(for kind: OverlayKind) -> Color {
+    switch kind {
+    case .text: .purple
+    case .caption: .blue
+    case .image: .orange
+    }
+  }
+
+  private func trackTitle(for kind: OverlayKind) -> String {
+    switch kind {
+    case .text: "Дорожка текста"
+    case .caption: "Дорожка субтитров"
+    case .image: "Дорожка изображений"
+    }
   }
 
   private func overlayAdjustment(
@@ -1006,7 +1019,10 @@ struct TimelineView: View {
       .padding(.vertical, 3)
       .contentShape(Rectangle().inset(by: -4))
       .highPriorityGesture(
-        DragGesture(minimumDistance: 1)
+        DragGesture(
+          minimumDistance: 1,
+          coordinateSpace: .global
+        )
           .onChanged { value in
             activeOverlayID = item.id
             activeOverlayEdge = edge
@@ -1062,8 +1078,12 @@ private struct ClipThumbnailStrip: View {
   let width: CGFloat
   @State private var images: [CGImage] = []
 
+  private let targetThumbnailWidth: CGFloat = 176
+
   private var imageCount: Int {
-    min(10, max(1, Int(ceil(width / 92))))
+    let countForWidth = max(1, Int(ceil(width / targetThumbnailWidth)))
+    let availableFrames = max(1, Int(ceil(clip.duration * 30)))
+    return min(countForWidth, availableFrames)
   }
 
   var body: some View {
@@ -1080,23 +1100,35 @@ private struct ClipThumbnailStrip: View {
           ForEach(Array(images.enumerated()), id: \.offset) { _, image in
             Image(decorative: image, scale: 1)
               .resizable()
-              .scaledToFill()
+              .scaledToFit()
               .frame(
-                width: max(1, (proxy.size.width - CGFloat(images.count - 1))
-                  / CGFloat(images.count)),
-                height: proxy.size.height
+                width: max(
+                  1,
+                  (proxy.size.width - CGFloat(imageCount - 1))
+                    / CGFloat(imageCount)
+                ),
+                height: proxy.size.height,
+                alignment: .center
               )
+              .background(Color.black.opacity(0.3))
               .clipped()
           }
         }
+        .frame(
+          maxWidth: .infinity,
+          maxHeight: .infinity,
+          alignment: .leading
+        )
       }
     }
     .task(id: thumbnailRequestID) {
-      images = await ClipThumbnailGenerator.images(
+      let requestedImages = await ClipThumbnailGenerator.images(
         for: clip,
         count: imageCount,
         height: 100
       )
+      guard !Task.isCancelled else { return }
+      images = requestedImages
     }
     .accessibilityHidden(true)
   }

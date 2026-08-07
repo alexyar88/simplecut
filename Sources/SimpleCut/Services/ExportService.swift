@@ -119,7 +119,7 @@ enum ExportService {
     }
     parent.addSublayer(video)
 
-    for item in overlays {
+    for item in overlays.inCompositingOrder {
       let layer: CALayer
       switch item.kind {
       case .text, .caption:

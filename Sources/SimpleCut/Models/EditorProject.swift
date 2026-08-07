@@ -3,7 +3,7 @@ import SwiftUI
 
 @MainActor
 final class EditorProject: ObservableObject {
-  @Published var name = "Без названия"
+  @Published var name: String
   @Published var canvas: CanvasPreset = .vertical
   @Published var scalingMode: VideoScalingMode = .fit
   @Published var clips: [VideoClip] = []
@@ -18,6 +18,7 @@ final class EditorProject: ObservableObject {
   }
   @Published private(set) var selectedClipIDs: Set<UUID> = []
   @Published var selectedOverlayID: UUID?
+  @Published private(set) var inspectorFocusRequestID = UUID()
   @Published var playhead: Double = 0
   @Published var timelineZoom = 1.0
   @Published var isBusy = false
@@ -34,11 +35,14 @@ final class EditorProject: ObservableObject {
   @Published private(set) var canRedo = false
   @Published private(set) var isDirty = false
   @Published private(set) var currentProjectURL: URL?
-  @Published private(set) var hasSavedCaptionStyle = false
+  @Published private(set) var savedCaptionStyles: [NamedOverlayStyle] = []
+  @Published private(set) var savedTextStyles: [NamedOverlayStyle] = []
 
   let player = AVPlayer()
   private let transcriptionService = LocalTranscriptionService()
   private let captionStyleDefaults: UserDefaults
+  private let now: () -> Date
+  private let namingTimeZone: TimeZone
   private var waveformGenerationID = UUID()
   private var playbackGenerationID = UUID()
   private var previewAudioURL: URL?
@@ -62,11 +66,22 @@ final class EditorProject: ObservableObject {
 
   init(
     loadRecovery: Bool = true,
-    captionStyleDefaults: UserDefaults = .standard
+    captionStyleDefaults: UserDefaults = .standard,
+    now: @escaping () -> Date = Date.init,
+    namingTimeZone: TimeZone = .current
   ) {
+    self.name = Self.defaultName(for: now(), timeZone: namingTimeZone)
     self.captionStyleDefaults = captionStyleDefaults
-    hasSavedCaptionStyle =
-      CaptionStyleStore.customStyle(in: captionStyleDefaults) != nil
+    self.now = now
+    self.namingTimeZone = namingTimeZone
+    savedCaptionStyles = CaptionStyleStore.namedStyles(
+      for: .caption,
+      in: captionStyleDefaults
+    )
+    savedTextStyles = CaptionStyleStore.namedStyles(
+      for: .text,
+      in: captionStyleDefaults
+    )
     guard loadRecovery else { return }
     guard let recovered = try? RecoveryService.load() else { return }
     name = recovered.name
@@ -109,6 +124,18 @@ final class EditorProject: ObservableObject {
     return trimmed.isEmpty ? "Без названия" : trimmed
   }
 
+  static func defaultName(
+    for date: Date,
+    timeZone: TimeZone = .current
+  ) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "ru_RU")
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.timeZone = timeZone
+    formatter.dateFormat = "yyyy-MM-dd HH-mm"
+    return "Видео \(formatter.string(from: date))"
+  }
+
   var selectedOverlayIndex: Int? {
     guard let selectedOverlayID else { return nil }
     return overlays.firstIndex { $0.id == selectedOverlayID }
@@ -124,9 +151,13 @@ final class EditorProject: ObservableObject {
   var canDeleteCurrentCaptionStyle: Bool {
     guard
       let item = overlays.first(where: { $0.kind == .caption }),
-      let saved = CaptionStyleStore.customStyle(in: captionStyleDefaults)
+      canDeleteSavedStyle(for: item.id)
     else { return false }
-    return CaptionStyle(item: item) == saved
+    return true
+  }
+
+  var hasSavedCaptionStyle: Bool {
+    !savedCaptionStyles.isEmpty
   }
 
   var canSplitAtPlayhead: Bool {
@@ -152,7 +183,7 @@ final class EditorProject: ObservableObject {
     player.pause()
     player.replaceCurrentItem(with: nil)
     discardPreviewAudio()
-    name = "Без названия"
+    name = Self.defaultName(for: now(), timeZone: namingTimeZone)
     canvas = .vertical
     scalingMode = .fit
     clips = []
@@ -283,6 +314,7 @@ final class EditorProject: ObservableObject {
       text: "Ваш текст"
     )
     overlays.append(item)
+    clearClipSelection()
     selectedOverlayID = item.id
   }
 
@@ -412,6 +444,7 @@ final class EditorProject: ObservableObject {
     guard let item = overlays.first(where: { $0.id == id }) else { return }
     clearClipSelection()
     selectedOverlayID = id
+    inspectorFocusRequestID = UUID()
     if seekToStart {
       seek(to: item.startTime)
     }
@@ -428,6 +461,7 @@ final class EditorProject: ObservableObject {
       overlays[index].fontSize = source.fontSize
       overlays[index].fontName = source.fontName
       overlays[index].fontWeight = source.fontWeight
+      overlays[index].textAlignment = source.textAlignment
       overlays[index].foregroundHex = source.foregroundHex
       overlays[index].backgroundHex = source.backgroundHex
       overlays[index].strokeHex = source.strokeHex
@@ -449,39 +483,149 @@ final class EditorProject: ObservableObject {
     }
   }
 
+  func setOverlayWidth(id: UUID, normalizedWidth: Double) {
+    guard let item = overlays.first(where: { $0.id == id }) else { return }
+    let width = min(1, max(0.1, normalizedWidth))
+    if item.kind == .caption {
+      for index in overlays.indices where overlays[index].kind == .caption {
+        overlays[index].normalizedWidth = width
+      }
+    } else if let index = overlays.firstIndex(where: { $0.id == id }) {
+      overlays[index].normalizedWidth = width
+    }
+  }
+
   func applyCaptionPreset(_ preset: CaptionStylePreset) {
-    applyCaptionStyle(preset.style)
+    guard let id = overlays.first(where: { $0.kind == .caption })?.id else {
+      return
+    }
+    applyStyle(preset.style, to: id)
     CaptionStyleStore.select(preset: preset, in: captionStyleDefaults)
   }
 
   func applySavedCaptionStyle() {
     guard
-      let style = CaptionStyleStore.customStyle(in: captionStyleDefaults)
+      let id = overlays.first(where: { $0.kind == .caption })?.id,
+      let name =
+        savedCaptionStyles.first(where: { $0.name == "Мой стиль" })?.name
+        ?? savedCaptionStyles.first?.name
     else { return }
-    applyCaptionStyle(style)
-    CaptionStyleStore.selectCustom(in: captionStyleDefaults)
+    applySavedStyle(named: name, to: id)
   }
 
   func saveCurrentCaptionStyle() {
     guard
-      let item = overlays.first(where: { $0.kind == .caption })
+      let id = overlays.first(where: { $0.kind == .caption })?.id
     else { return }
-    CaptionStyleStore.saveCustom(
-      CaptionStyle(item: item),
+    saveStyle(named: "Мой стиль", from: id)
+  }
+
+  func applyPreset(_ preset: CaptionStylePreset, to id: UUID) {
+    applyStyle(preset.style, to: id)
+  }
+
+  func styles(for kind: OverlayKind) -> [NamedOverlayStyle] {
+    kind == .caption ? savedCaptionStyles : savedTextStyles
+  }
+
+  func applySavedStyle(named name: String, to id: UUID) {
+    guard
+      let item = overlays.first(where: { $0.id == id }),
+      let style = styles(for: item.kind).first(where: {
+        $0.name == name
+      })?.style
+    else { return }
+    applyStyle(style, to: id)
+    if item.kind == .caption {
+      CaptionStyleStore.select(
+        style: style,
+        in: captionStyleDefaults
+      )
+    }
+  }
+
+  func applySavedStyle(to id: UUID) {
+    guard
+      let item = overlays.first(where: { $0.id == id }),
+      let name =
+        styles(for: item.kind).first(where: {
+          $0.name == "Мой стиль"
+        })?.name
+        ?? styles(for: item.kind).first?.name
+    else { return }
+    applySavedStyle(named: name, to: id)
+  }
+
+  func saveStyle(named name: String, from id: UUID) {
+    guard let item = overlays.first(where: { $0.id == id }) else { return }
+    let style = CaptionStyle(item: item)
+    CaptionStyleStore.saveNamed(
+      style,
+      name: name,
+      for: item.kind,
       in: captionStyleDefaults
     )
-    hasSavedCaptionStyle = true
+    if item.kind == .caption {
+      CaptionStyleStore.select(
+        style: style,
+        in: captionStyleDefaults
+      )
+    }
+    refreshSavedStyles()
+  }
+
+  func saveStyle(from id: UUID) {
+    saveStyle(named: "Мой стиль", from: id)
+  }
+
+  func canDeleteSavedStyle(for id: UUID) -> Bool {
+    guard
+      let item = overlays.first(where: { $0.id == id }),
+      styles(for: item.kind).contains(where: {
+        $0.style == CaptionStyle(item: item)
+      })
+    else { return false }
+    return true
+  }
+
+  func deleteStyle(named name: String, for kind: OverlayKind) {
+    CaptionStyleStore.deleteNamed(
+      name: name,
+      for: kind,
+      in: captionStyleDefaults
+    )
+    refreshSavedStyles()
   }
 
   func deleteSavedCaptionStyle() {
-    CaptionStyleStore.deleteCustom(in: captionStyleDefaults)
-    hasSavedCaptionStyle = false
+    CaptionStyleStore.deleteAllNamed(
+      for: .caption,
+      in: captionStyleDefaults
+    )
+    CaptionStyleStore.select(
+      preset: .classic,
+      in: captionStyleDefaults
+    )
+    refreshSavedStyles()
   }
 
-  private func applyCaptionStyle(_ style: CaptionStyle) {
-    let indices = overlays.indices.filter {
-      overlays[$0].kind == .caption
-    }
+  private func refreshSavedStyles() {
+    savedCaptionStyles = CaptionStyleStore.namedStyles(
+      for: .caption,
+      in: captionStyleDefaults
+    )
+    savedTextStyles = CaptionStyleStore.namedStyles(
+      for: .text,
+      in: captionStyleDefaults
+    )
+  }
+
+  private func applyStyle(_ style: CaptionStyle, to id: UUID) {
+    guard let item = overlays.first(where: { $0.id == id }) else { return }
+    let indices =
+      item.kind == .caption
+      ? overlays.indices.filter { overlays[$0].kind == .caption }
+      : overlays.indices.filter { overlays[$0].id == id }
     guard !indices.isEmpty else { return }
     recordUndoCheckpoint()
     for index in indices {

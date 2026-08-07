@@ -95,6 +95,48 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertEqual(project.displayName, "Мой ролик")
   }
 
+  @MainActor
+  func testNewProjectUsesLocalizedVideoNameAndResetRefreshesIt() {
+    let timeZone = TimeZone(secondsFromGMT: 3 * 60 * 60)!
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = timeZone
+    let firstDate = calendar.date(
+      from: DateComponents(
+        year: 2026,
+        month: 8,
+        day: 7,
+        hour: 16,
+        minute: 10
+      )
+    )!
+    let secondDate = calendar.date(
+      from: DateComponents(
+        year: 2026,
+        month: 8,
+        day: 8,
+        hour: 9,
+        minute: 5
+      )
+    )!
+    var currentDate = firstDate
+    let project = EditorProject(
+      loadRecovery: false,
+      now: { currentDate },
+      namingTimeZone: timeZone
+    )
+
+    XCTAssertEqual(
+      EditorProject.defaultName(for: firstDate, timeZone: timeZone),
+      "Видео 2026-08-07 16-10"
+    )
+    XCTAssertEqual(project.name, "Видео 2026-08-07 16-10")
+
+    currentDate = secondDate
+    project.reset()
+
+    XCTAssertEqual(project.name, "Видео 2026-08-08 09-05")
+  }
+
   func testProjectRoundTripKeepsClipsAndOverlays() throws {
     let clip = VideoClip(
       sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
@@ -669,6 +711,166 @@ final class ProjectModelsTests: XCTestCase {
   }
 
   @MainActor
+  func testTextOverlayCanSaveAndReuseCustomStyle() {
+    let defaults = isolatedCaptionStyleDefaults()
+    let project = EditorProject(
+      loadRecovery: false,
+      captionStyleDefaults: defaults
+    )
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 5
+      )
+    ]
+    project.addText()
+    let overlayID = try! XCTUnwrap(project.overlays.first?.id)
+    project.overlays[0].fontName = "Georgia"
+    project.overlays[0].fontSize = 88
+    project.overlays[0].strokeHex = "#FF00FFFF"
+    project.overlays[0].strokeWidth = 6
+    project.overlays[0].textPadding = 21
+    project.overlays[0].cornerRadius = 14
+    project.overlays[0].normalizedWidth = 0.73
+    project.overlays[0].textAlignment = .right
+
+    project.saveStyle(from: overlayID)
+    project.overlays[0].fontName = "Arial"
+    project.overlays[0].fontSize = 30
+    project.overlays[0].textAlignment = .left
+    project.applySavedStyle(to: overlayID)
+
+    XCTAssertTrue(project.savedCaptionStyles.isEmpty)
+    XCTAssertEqual(project.savedTextStyles.map(\.name), ["Мой стиль"])
+    XCTAssertEqual(project.overlays[0].fontName, "Georgia")
+    XCTAssertEqual(project.overlays[0].fontSize, 88)
+    XCTAssertEqual(project.overlays[0].strokeHex, "#FF00FFFF")
+    XCTAssertEqual(project.overlays[0].strokeWidth, 6)
+    XCTAssertEqual(project.overlays[0].textPadding, 21)
+    XCTAssertEqual(project.overlays[0].cornerRadius, 14)
+    XCTAssertEqual(project.overlays[0].normalizedWidth, 0.73)
+    XCTAssertEqual(project.overlays[0].textAlignment, .right)
+    XCTAssertTrue(project.canDeleteSavedStyle(for: overlayID))
+  }
+
+  @MainActor
+  func testMultilineTextRendersTallerAndKeepsExplicitLineBreaks() {
+    let singleLine = OverlayItem(
+      kind: .text,
+      startTime: 0,
+      duration: 1,
+      normalizedWidth: 0.7,
+      text: "Первая строка",
+      fontSize: 54,
+      textAlignment: .left
+    )
+    var multiline = singleLine
+    multiline.text = "Первая строка\nВторая строка\nТретья строка"
+    multiline.textAlignment = .right
+
+    let singleRender = CaptionRenderer.render(
+      item: singleLine,
+      canvasSize: CGSize(width: 1_080, height: 1_920)
+    )
+    let multilineRender = CaptionRenderer.render(
+      item: multiline,
+      canvasSize: CGSize(width: 1_080, height: 1_920)
+    )
+
+    XCTAssertGreaterThan(
+      try! XCTUnwrap(multilineRender).size.height,
+      try! XCTUnwrap(singleRender).size.height
+    )
+    XCTAssertEqual(multiline.text, "Первая строка\nВторая строка\nТретья строка")
+    XCTAssertEqual(multiline.textAlignment, .right)
+  }
+
+  func testLegacyCaptionStyleDefaultsToCenteredAlignment() throws {
+    let data = Data(
+      """
+      {
+        "fontSize": 72,
+        "fontName": "Georgia",
+        "fontWeight": "bold"
+      }
+      """.utf8
+    )
+
+    let style = try JSONDecoder().decode(CaptionStyle.self, from: data)
+
+    XCTAssertEqual(style.textAlignment, .center)
+    XCTAssertEqual(style.fontSize, 72)
+    XCTAssertEqual(style.fontName, "Georgia")
+  }
+
+  @MainActor
+  func testNamedTextAndCaptionStylesAreIndependent() {
+    let defaults = isolatedCaptionStyleDefaults()
+    let project = EditorProject(
+      loadRecovery: false,
+      captionStyleDefaults: defaults
+    )
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 5
+      )
+    ]
+    let captions = project.replaceCaptions(with: [
+      CaptionDraft(text: "Caption", startTime: 0, endTime: 1)
+    ])
+    project.addText()
+    let captionID = try! XCTUnwrap(captions.first?.id)
+    let textID = try! XCTUnwrap(
+      project.overlays.first(where: { $0.kind == .text })?.id
+    )
+    let captionIndex = try! XCTUnwrap(
+      project.overlays.firstIndex(where: { $0.id == captionID })
+    )
+    let textIndex = try! XCTUnwrap(
+      project.overlays.firstIndex(where: { $0.id == textID })
+    )
+
+    project.overlays[captionIndex].fontSize = 70
+    project.saveStyle(named: "Крупные субтитры", from: captionID)
+    project.overlays[captionIndex].fontSize = 48
+    project.saveStyle(named: "Мелкие субтитры", from: captionID)
+    project.overlays[textIndex].fontSize = 92
+    project.saveStyle(named: "Заголовок", from: textID)
+
+    XCTAssertEqual(
+      project.savedCaptionStyles.map(\.name),
+      ["Крупные субтитры", "Мелкие субтитры"]
+    )
+    XCTAssertEqual(project.savedTextStyles.map(\.name), ["Заголовок"])
+
+    project.overlays[captionIndex].fontSize = 20
+    project.overlays[textIndex].fontSize = 20
+    project.applySavedStyle(named: "Крупные субтитры", to: captionID)
+
+    XCTAssertEqual(project.overlays[captionIndex].fontSize, 70)
+    XCTAssertEqual(project.overlays[textIndex].fontSize, 20)
+
+    project.applySavedStyle(named: "Заголовок", to: textID)
+
+    XCTAssertEqual(project.overlays[captionIndex].fontSize, 70)
+    XCTAssertEqual(project.overlays[textIndex].fontSize, 92)
+
+    project.deleteStyle(
+      named: "Мелкие субтитры",
+      for: .caption
+    )
+
+    XCTAssertEqual(
+      project.savedCaptionStyles.map(\.name),
+      ["Крупные субтитры"]
+    )
+    XCTAssertEqual(project.savedTextStyles.map(\.name), ["Заголовок"])
+  }
+
+  @MainActor
   func testDeletingSavedCaptionStyleRestoresClassicForFutureProjects() {
     let defaults = isolatedCaptionStyleDefaults()
     CaptionStyleStore.saveCustom(
@@ -869,6 +1071,92 @@ final class ProjectModelsTests: XCTestCase {
       project.overlays[0].startTime + project.overlays[0].duration,
       9
     )
+  }
+
+  @MainActor
+  func testRepeatedOverlaySelectionRequestsInspectorFocus() {
+    let project = EditorProject(loadRecovery: false)
+    let overlay = OverlayItem(
+      kind: .text,
+      startTime: 0,
+      duration: 1,
+      text: "Text"
+    )
+    project.overlays = [overlay]
+    let initialRequest = project.inspectorFocusRequestID
+
+    project.selectOverlay(id: overlay.id)
+    let firstRequest = project.inspectorFocusRequestID
+    project.selectOverlay(id: overlay.id)
+    let secondRequest = project.inspectorFocusRequestID
+
+    XCTAssertNotEqual(firstRequest, initialRequest)
+    XCTAssertNotEqual(secondRequest, firstRequest)
+    XCTAssertEqual(project.selectedOverlayID, overlay.id)
+  }
+
+  @MainActor
+  func testOverlayKindsHaveConsistentTimelineAndCompositingOrder() {
+    let image = OverlayItem(
+      kind: .image,
+      startTime: 0,
+      duration: 1
+    )
+    let text = OverlayItem(
+      kind: .text,
+      startTime: 0,
+      duration: 1,
+      text: "Text"
+    )
+    let caption = OverlayItem(
+      kind: .caption,
+      startTime: 0,
+      duration: 1,
+      text: "Caption"
+    )
+    let overlays = [caption, text, image]
+
+    XCTAssertEqual(
+      OverlayKind.timelineKinds(for: overlays),
+      [.text, .caption, .image]
+    )
+    XCTAssertEqual(
+      overlays.inCompositingOrder.map(\.kind),
+      [.image, .caption, .text]
+    )
+  }
+
+  @MainActor
+  func testOverlayWidthResizeClampsAndKeepsCaptionWidthsTogether() {
+    let project = EditorProject(loadRecovery: false)
+    let firstCaption = OverlayItem(
+      kind: .caption,
+      startTime: 0,
+      duration: 1,
+      text: "First"
+    )
+    let secondCaption = OverlayItem(
+      kind: .caption,
+      startTime: 1,
+      duration: 1,
+      text: "Second"
+    )
+    let image = OverlayItem(
+      kind: .image,
+      startTime: 0,
+      duration: 2
+    )
+    project.overlays = [firstCaption, secondCaption, image]
+
+    project.setOverlayWidth(
+      id: firstCaption.id,
+      normalizedWidth: 0.72
+    )
+    project.setOverlayWidth(id: image.id, normalizedWidth: 2)
+
+    XCTAssertEqual(project.overlays[0].normalizedWidth, 0.72)
+    XCTAssertEqual(project.overlays[1].normalizedWidth, 0.72)
+    XCTAssertEqual(project.overlays[2].normalizedWidth, 1)
   }
 
   @MainActor

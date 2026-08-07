@@ -20,7 +20,7 @@ enum CaptionRenderer {
       toHaveTrait: item.fontWeight.fontTrait
     )
     let paragraph = NSMutableParagraphStyle()
-    paragraph.alignment = .center
+    paragraph.alignment = item.textAlignment.nsTextAlignment
     paragraph.lineBreakMode = .byWordWrapping
     var attributes: [NSAttributedString.Key: Any] = [
       .font: font,
@@ -104,6 +104,16 @@ enum CaptionRenderer {
       image: image,
       size: CGSize(width: width, height: height)
     )
+  }
+}
+
+extension OverlayTextAlignment {
+  var nsTextAlignment: NSTextAlignment {
+    switch self {
+    case .left: .left
+    case .center: .center
+    case .right: .right
+    }
   }
 }
 

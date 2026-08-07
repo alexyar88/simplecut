@@ -2,6 +2,10 @@ import SwiftUI
 
 struct InspectorView: View {
   @EnvironmentObject private var project: EditorProject
+  @State private var pendingStyleSave: PendingStyleSave?
+  @State private var styleNameDraft = ""
+  @State private var currentCaptionStyleName: String?
+  @State private var currentTextStyleName: String?
 
   var body: some View {
     ScrollViewReader { proxy in
@@ -65,57 +69,6 @@ struct InspectorView: View {
         }
 
         if !project.clips.isEmpty {
-          Section("Автосубтитры") {
-            Picker(
-              "Язык",
-              selection: $project.transcriptionLanguage
-            ) {
-              ForEach(TranscriptionLanguage.allCases) { language in
-                Text(language.title).tag(language)
-              }
-            }
-            Picker("Модель речи", selection: $project.transcriptionModel) {
-              ForEach(TranscriptionModel.allCases) { model in
-                Text(model.title).tag(model)
-              }
-            }
-            Text(project.transcriptionModel.downloadHint)
-              .font(.caption)
-              .foregroundStyle(.secondary)
-            if project.isTranscribing {
-              Button("Отменить создание", role: .cancel) {
-                project.cancelTranscription()
-              }
-            } else {
-              HStack {
-                Button("Создать субтитры") {
-                  project.generateCaptions()
-                }
-                Button("Удалить субтитры", role: .destructive) {
-                  project.deleteAllCaptions()
-                }
-                .tint(.red)
-                .disabled(
-                  !project.overlays.contains(where: { $0.kind == .caption })
-                )
-              }
-              .controlSize(.small)
-              .font(.caption)
-            }
-          }
-
-          if project.overlays.contains(where: { $0.kind == .caption }) {
-            captionSettingsSection
-            captionEditorSection
-          }
-
-          if let index = project.selectedOverlayIndex,
-            project.overlays[index].kind != .caption
-          {
-            overlaySection(index: index)
-              .id("selected-overlay")
-          }
-
           Section("Звук всего проекта") {
             Toggle(
               "Автонормализация звука",
@@ -168,6 +121,59 @@ struct InspectorView: View {
             }
           }
 
+          Section("Автосубтитры") {
+            Picker(
+              "Язык",
+              selection: $project.transcriptionLanguage
+            ) {
+              ForEach(TranscriptionLanguage.allCases) { language in
+                Text(language.title).tag(language)
+              }
+            }
+            Picker("Модель речи", selection: $project.transcriptionModel) {
+              ForEach(TranscriptionModel.allCases) { model in
+                Text(model.title).tag(model)
+              }
+            }
+            Text(project.transcriptionModel.downloadHint)
+              .font(.caption)
+              .foregroundStyle(.secondary)
+            if project.isTranscribing {
+              Button("Отменить создание", role: .cancel) {
+                project.cancelTranscription()
+              }
+            } else {
+              HStack {
+                Button("Создать субтитры") {
+                  project.generateCaptions()
+                }
+                Button("Удалить субтитры", role: .destructive) {
+                  project.deleteAllCaptions()
+                }
+                .tint(.red)
+                .disabled(
+                  !project.overlays.contains(where: { $0.kind == .caption })
+                )
+              }
+              .controlSize(.small)
+              .font(.caption)
+            }
+          }
+
+          if project.overlays.contains(where: { $0.kind == .caption }) {
+            captionSettingsSection
+            captionEditorSection
+          }
+
+          if let index = project.selectedOverlayIndex,
+            project.overlays[index].kind != .caption
+          {
+            overlaySection(index: index)
+              .onAppear {
+                scrollToSelectedOverlay(using: proxy)
+              }
+          }
+
         }
 
         if project.overlays.isEmpty {
@@ -181,21 +187,63 @@ struct InspectorView: View {
       .scrollContentBackground(.hidden)
       .background(EditorTheme.panel)
       .onChange(of: project.selectedOverlayID) {
-        guard let index = project.selectedOverlayIndex else { return }
-        withAnimation {
-          if project.overlays[index].kind == .caption {
-            proxy.scrollTo(
-              "caption-\(project.overlays[index].id)",
-              anchor: .center
-            )
-          } else {
-            proxy.scrollTo("selected-overlay", anchor: .top)
-          }
-        }
+        scrollToSelectedOverlay(using: proxy)
+      }
+      .onChange(of: project.inspectorFocusRequestID) {
+        scrollToSelectedOverlay(using: proxy)
       }
     }
     .frame(minWidth: 250, idealWidth: 280, maxWidth: 320)
     .background(EditorTheme.panel)
+    .alert(
+      "Сохранить стиль",
+      isPresented: Binding(
+        get: { pendingStyleSave != nil },
+        set: { isPresented in
+          if !isPresented {
+            pendingStyleSave = nil
+          }
+        }
+      )
+    ) {
+      TextField("Название стиля", text: $styleNameDraft)
+      Button("Сохранить") {
+        savePendingStyle()
+      }
+      .disabled(styleNameIsEmpty(styleNameDraft))
+      Button("Отмена", role: .cancel) {
+        pendingStyleSave = nil
+      }
+    } message: {
+      Text("Введите название, под которым сохранить текущие настройки.")
+    }
+  }
+
+  private func scrollToSelectedOverlay(
+    using proxy: ScrollViewProxy
+  ) {
+    guard let index = project.selectedOverlayIndex else { return }
+    let item = project.overlays[index]
+    let targetID =
+      item.kind == .caption
+      ? "caption-\(item.id)"
+      : overlayInspectorID(item.id)
+    let anchor: UnitPoint = item.kind == .caption ? .center : .top
+
+    Task { @MainActor in
+      await Task.yield()
+      try? await Task.sleep(for: .milliseconds(20))
+      withAnimation {
+        proxy.scrollTo(
+          targetID,
+          anchor: anchor
+        )
+      }
+    }
+  }
+
+  private func overlayInspectorID(_ id: UUID) -> String {
+    "overlay-\(id)"
   }
 
   private var captionEditorSection: some View {
@@ -211,125 +259,94 @@ struct InspectorView: View {
     }
   }
 
+  @ViewBuilder
   private var captionSettingsSection: some View {
-    Section("Оформление субтитров") {
-      Menu {
-        ForEach(CaptionStylePreset.allCases) { preset in
-          Button(preset.title) {
-            project.applyCaptionPreset(preset)
+    if let id = project.overlays.first(where: {
+      $0.kind == .caption
+    })?.id {
+      Section("Оформление субтитров") {
+        Picker(
+          "Шрифт",
+          selection: captionBinding(
+            \.fontName,
+            fallback: "Helvetica Neue",
+            recordsCheckpoint: true
+          )
+        ) {
+          ForEach(fontFamilies, id: \.self) { family in
+            Text(family).tag(family)
           }
         }
-        if project.hasSavedCaptionStyle {
-          Divider()
-          Button("Мой стиль") {
-            project.applySavedCaptionStyle()
+        .pickerStyle(.menu)
+        Picker(
+          "Начертание",
+          selection: captionBinding(
+            \.fontWeight,
+            fallback: .semibold,
+            recordsCheckpoint: true
+          )
+        ) {
+          ForEach(CaptionFontWeight.allCases) { weight in
+            Text(weight.title).tag(weight)
           }
         }
-      } label: {
-        HStack {
-          Text("Быстрый стиль")
-          Spacer()
-          Image(systemName: "chevron.down")
-            .font(.caption.bold())
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-          Color.primary.opacity(0.09),
-          in: RoundedRectangle(cornerRadius: 8)
+        .pickerStyle(.menu)
+        alignmentPicker(
+          selection: captionBinding(
+            \.textAlignment,
+            fallback: .center,
+            recordsCheckpoint: true
+          )
         )
-        .contentShape(RoundedRectangle(cornerRadius: 8))
-      }
-      .menuStyle(.button)
-      .buttonStyle(.plain)
-      Picker(
-        "Шрифт",
-        selection: captionBinding(
-          \.fontName,
-          fallback: "Helvetica Neue",
-          recordsCheckpoint: true
+        inspectorSlider(
+          "Размер шрифта",
+          value: captionBinding(\.fontSize, fallback: 58),
+          range: 20...160,
+          suffix: " pt"
         )
-      ) {
-        ForEach(
-          ["Helvetica Neue", "Arial", "Avenir Next", "Georgia", "Menlo"],
-          id: \.self
-        ) { family in
-          Text(family).tag(family)
-        }
-      }
-      Picker(
-        "Начертание",
-        selection: captionBinding(
-          \.fontWeight,
-          fallback: .semibold,
-          recordsCheckpoint: true
+        ColorPicker(
+          "Цвет текста",
+          selection: captionColorBinding(\.foregroundHex),
+          supportsOpacity: true
         )
-      ) {
-        ForEach(CaptionFontWeight.allCases) { weight in
-          Text(weight.title).tag(weight)
-        }
-      }
-      valueSlider(
-        "Размер шрифта",
-        valueText:
-          "\(Int(captionBinding(\.fontSize, fallback: 58).wrappedValue.rounded())) pt",
-        value: captionBinding(\.fontSize, fallback: 58),
-        range: 20...160
-      )
-      ColorPicker(
-        "Цвет текста",
-        selection: captionColorBinding(\.foregroundHex),
-        supportsOpacity: true
-      )
-      ColorPicker(
-        "Цвет подложки",
-        selection: captionColorBinding(\.backgroundHex),
-        supportsOpacity: true
-      )
-      ColorPicker(
-        "Цвет обводки",
-        selection: captionColorBinding(\.strokeHex),
-        supportsOpacity: true
-      )
-      valueSlider(
-        "Толщина обводки",
-        valueText:
-          "\(Int(captionBinding(\.strokeWidth, fallback: 0).wrappedValue.rounded())) pt",
-        value: captionBinding(\.strokeWidth, fallback: 0),
-        range: 0...12
-      )
-      valueSlider(
-        "Отступы",
-        valueText:
-          "\(Int(captionBinding(\.textPadding, fallback: 12).wrappedValue.rounded())) pt",
-        value: captionBinding(\.textPadding, fallback: 12),
-        range: 0...40
-      )
-      valueSlider(
-        "Скругление",
-        valueText:
-          "\(Int(captionBinding(\.cornerRadius, fallback: 8).wrappedValue.rounded())) pt",
-        value: captionBinding(\.cornerRadius, fallback: 8),
-        range: 0...32
-      )
-      valueSlider(
-        "Ширина",
-        valueText:
-          "\(Int((captionBinding(\.normalizedWidth, fallback: 0.82).wrappedValue * 100).rounded()))%",
-        value: captionBinding(\.normalizedWidth, fallback: 0.82),
-        range: 0.25...1
-      )
-      HStack {
-        Button("Сохранить стиль") {
-          project.saveCurrentCaptionStyle()
-        }
-        .buttonStyle(.bordered)
-        Button("Удалить стиль", role: .destructive) {
-          project.deleteSavedCaptionStyle()
-        }
-        .buttonStyle(.bordered)
-        .tint(.red)
-        .disabled(!project.canDeleteCurrentCaptionStyle)
+        ColorPicker(
+          "Цвет подложки",
+          selection: captionColorBinding(\.backgroundHex),
+          supportsOpacity: true
+        )
+        ColorPicker(
+          "Цвет обводки",
+          selection: captionColorBinding(\.strokeHex),
+          supportsOpacity: true
+        )
+        inspectorSlider(
+          "Толщина обводки",
+          value: captionBinding(\.strokeWidth, fallback: 0),
+          range: 0...12,
+          suffix: " pt"
+        )
+        inspectorSlider(
+          "Отступы",
+          value: captionBinding(\.textPadding, fallback: 12),
+          range: 0...40,
+          suffix: " pt"
+        )
+        inspectorSlider(
+          "Скругление",
+          value: captionBinding(\.cornerRadius, fallback: 8),
+          range: 0...32,
+          suffix: " pt"
+        )
+        inspectorSlider(
+          "Ширина",
+          value: captionBinding(\.normalizedWidth, fallback: 0.82),
+          range: 0.25...1,
+          displayScale: 100,
+          suffix: "%"
+        )
+        Divider()
+        quickStyleMenu(kind: .caption, overlayID: id)
+        styleActionRow(kind: .caption, overlayID: id)
       }
     }
   }
@@ -402,39 +419,34 @@ struct InspectorView: View {
 
   @ViewBuilder
   private func overlaySection(index: Int) -> some View {
-    Section(layerTitle(project.overlays[index].kind)) {
-      if project.overlays[index].kind.isTextual {
-        TextField(
-          "Текст",
-          text: Binding(
-            get: { project.overlays[index].text ?? "" },
-            set: {
-              guard $0 != project.overlays[index].text else { return }
-              project.recordUndoCheckpoint()
-              project.overlays[index].text = $0
-            }
-          ),
-          axis: .vertical
-        )
-        valueSlider(
-          "Размер шрифта",
-          valueText: "\(Int(project.overlays[index].fontSize.rounded())) pt",
-          value: $project.overlays[index].fontSize,
-          range: 20...160
-        )
+    let item = project.overlays[index]
+    if item.kind == .text {
+      Section("Текст") {
+        textEditor(index: index)
         Picker("Шрифт", selection: $project.overlays[index].fontName) {
-          ForEach(
-            ["Helvetica Neue", "Arial", "Avenir Next", "Georgia", "Menlo"],
-            id: \.self
-          ) { family in
+          ForEach(fontFamilies, id: \.self) { family in
             Text(family).tag(family)
           }
         }
-        Picker("Начертание", selection: $project.overlays[index].fontWeight) {
+        .pickerStyle(.menu)
+        Picker(
+          "Начертание",
+          selection: $project.overlays[index].fontWeight
+        ) {
           ForEach(CaptionFontWeight.allCases) { weight in
             Text(weight.title).tag(weight)
           }
         }
+        .pickerStyle(.menu)
+        alignmentPicker(
+          selection: $project.overlays[index].textAlignment
+        )
+        inspectorSlider(
+          "Размер шрифта",
+          value: $project.overlays[index].fontSize,
+          range: 20...160,
+          suffix: " pt"
+        )
         ColorPicker(
           "Цвет текста",
           selection: colorBinding(
@@ -449,87 +461,298 @@ struct InspectorView: View {
           ),
           supportsOpacity: true
         )
-        valueSlider(
-          "Отступы",
-          valueText: "\(Int(project.overlays[index].textPadding.rounded())) pt",
-          value: $project.overlays[index].textPadding,
-          range: 0...40
-        )
-        valueSlider(
-          "Скругление",
-          valueText: "\(Int(project.overlays[index].cornerRadius.rounded())) pt",
-          value: $project.overlays[index].cornerRadius,
-          range: 0...32
-        )
-      }
-      LabeledContent("Начало") {
-        EditableTimeField(
-          value: project.overlays[index].startTime,
-          range: 0...max(0, project.duration - 0.1),
-          accessibilityLabel: "Начало слоя"
-        ) { value in
-          project.recordUndoCheckpoint()
-          project.setOverlayStart(id: project.overlays[index].id, to: value)
-        }
-      }
-      LabeledContent("Длительность") {
-        EditableTimeField(
-          value: project.overlays[index].duration,
-          range:
-            0.1...max(
-              0.1,
-              project.duration - project.overlays[index].startTime
-            ),
-          accessibilityLabel: "Длительность слоя"
-        ) { value in
-          project.recordUndoCheckpoint()
-          project.setOverlayDuration(
-            id: project.overlays[index].id,
-            to: value
-          )
-        }
-      }
-      Slider(
-        value: $project.overlays[index].duration,
-        in:
-          0.1...max(
-            0.1,
-            project.duration - project.overlays[index].startTime
+        ColorPicker(
+          "Цвет обводки",
+          selection: colorBinding(
+            hex: $project.overlays[index].strokeHex
           ),
-        onEditingChanged: checkpointAtStart
-      )
-      .accessibilityLabel("Длительность слоя")
-      .accessibilityValue(project.overlays[index].duration.timestamp)
-      valueSlider(
-        "Ширина",
-        valueText: "\(Int((project.overlays[index].normalizedWidth * 100).rounded()))%",
-        value: $project.overlays[index].normalizedWidth,
-        range: 0.1...1
-      )
-      valueSlider(
-        "Прозрачность",
-        valueText: "\(Int((project.overlays[index].opacity * 100).rounded()))%",
-        value: $project.overlays[index].opacity,
-        range: 0...1
-      )
-      valueSlider(
-        "Поворот",
-        valueText: "\(Int(project.overlays[index].rotation.rounded()))°",
-        value: $project.overlays[index].rotation,
-        range: -180...180
-      )
-      Button("Удалить слой", role: .destructive) {
-        project.recordUndoCheckpoint()
-        project.overlays.remove(at: index)
-        project.selectedOverlayID = nil
+          supportsOpacity: true
+        )
+        inspectorSlider(
+          "Толщина обводки",
+          value: $project.overlays[index].strokeWidth,
+          range: 0...12,
+          suffix: " pt"
+        )
+        inspectorSlider(
+          "Отступы",
+          value: $project.overlays[index].textPadding,
+          range: 0...40,
+          suffix: " pt"
+        )
+        inspectorSlider(
+          "Скругление",
+          value: $project.overlays[index].cornerRadius,
+          range: 0...32,
+          suffix: " pt"
+        )
+        transformControls(index: index, minimumWidth: 0.25)
+        Divider()
+        quickStyleMenu(kind: .text, overlayID: item.id)
+        styleActionRow(kind: .text, overlayID: item.id)
       }
+      .id(overlayInspectorID(item.id))
+    } else if item.kind == .image {
+      Section("Изображение") {
+        transformControls(index: index, minimumWidth: 0.1)
+      }
+      .id(overlayInspectorID(item.id))
     }
   }
 
-  private func checkpointAtStart(_ isEditing: Bool) {
-    if isEditing {
-      project.recordUndoCheckpoint()
+  private var fontFamilies: [String] {
+    ["Helvetica Neue", "Arial", "Avenir Next", "Georgia", "Menlo"]
+  }
+
+  private func textEditor(index: Int) -> some View {
+    let text = Binding(
+      get: { project.overlays[index].text ?? "" },
+      set: { newValue in
+        guard newValue != project.overlays[index].text else { return }
+        project.recordUndoCheckpoint()
+        project.overlays[index].text = newValue
+      }
+    )
+    return ZStack(alignment: .topLeading) {
+      if text.wrappedValue.isEmpty {
+        Text("Введите текст…")
+          .foregroundStyle(.tertiary)
+          .padding(.horizontal, 9)
+          .padding(.vertical, 10)
+          .allowsHitTesting(false)
+      }
+      TextEditor(text: text)
+        .font(.body)
+        .scrollContentBackground(.hidden)
+        .padding(4)
     }
+    .frame(minHeight: 88, maxHeight: 150)
+    .background(
+      Color(nsColor: .controlBackgroundColor).opacity(0.55),
+      in: RoundedRectangle(cornerRadius: 8)
+    )
+    .overlay {
+      RoundedRectangle(cornerRadius: 8)
+        .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+    }
+    .accessibilityLabel("Текст слоя")
+  }
+
+  private func quickStyleMenu(
+    kind: OverlayKind,
+    overlayID: UUID
+  ) -> some View {
+    Menu {
+      ForEach(CaptionStylePreset.allCases) { preset in
+        Button(preset.title) {
+          if kind == .caption {
+            project.applyCaptionPreset(preset)
+          } else {
+            project.applyPreset(preset, to: overlayID)
+          }
+          setCurrentStyleName(nil, for: kind)
+        }
+      }
+      let styles = project.styles(for: kind)
+      if !styles.isEmpty {
+        Divider()
+        ForEach(styles) { savedStyle in
+          Button(savedStyle.name) {
+            project.applySavedStyle(
+              named: savedStyle.name,
+              to: overlayID
+            )
+            setCurrentStyleName(savedStyle.name, for: kind)
+          }
+        }
+      }
+    } label: {
+      HStack {
+        Text(currentStyleName(for: kind) ?? "Быстрый стиль")
+        Spacer()
+        Image(systemName: "chevron.down")
+          .font(.caption.bold())
+      }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 8)
+      .background(
+        Color.primary.opacity(0.09),
+        in: RoundedRectangle(cornerRadius: 8)
+      )
+      .contentShape(RoundedRectangle(cornerRadius: 8))
+    }
+    .menuStyle(.button)
+    .buttonStyle(.plain)
+  }
+
+  private func alignmentPicker(
+    selection: Binding<OverlayTextAlignment>
+  ) -> some View {
+    LabeledContent("Выравнивание") {
+      Picker("Выравнивание", selection: selection) {
+        ForEach(OverlayTextAlignment.allCases) { alignment in
+          Image(systemName: alignment.systemImage)
+            .help(alignment.title)
+            .tag(alignment)
+        }
+      }
+      .labelsHidden()
+      .pickerStyle(.segmented)
+      .frame(width: 118)
+    }
+  }
+
+  @ViewBuilder
+  private func transformControls(
+    index: Int,
+    minimumWidth: Double
+  ) -> some View {
+    inspectorSlider(
+      "Ширина",
+      value: $project.overlays[index].normalizedWidth,
+      range: minimumWidth...1,
+      displayScale: 100,
+      suffix: "%"
+    )
+    inspectorSlider(
+      "Прозрачность",
+      value: $project.overlays[index].opacity,
+      range: 0...1,
+      displayScale: 100,
+      suffix: "%"
+    )
+    inspectorSlider(
+      "Поворот",
+      value: $project.overlays[index].rotation,
+      range: -180...180,
+      suffix: "°"
+    )
+  }
+
+  private func styleNameIsEmpty(_ name: String) -> Bool {
+    name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  private func styleActionRow(
+    kind: OverlayKind,
+    overlayID: UUID
+  ) -> some View {
+    let currentName = currentStyleName(for: kind)
+    let canDelete =
+      currentName.map { name in
+        project.styles(for: kind).contains { $0.name == name }
+      } ?? false
+    return HStack(spacing: 8) {
+      Button("Сохранить стиль") {
+        beginSavingStyle(kind: kind, overlayID: overlayID)
+      }
+      .buttonStyle(.bordered)
+      Button("Удалить стиль", role: .destructive) {
+        guard let currentName else { return }
+        project.deleteStyle(named: currentName, for: kind)
+        setCurrentStyleName(nil, for: kind)
+      }
+      .buttonStyle(.bordered)
+      .tint(.red)
+      .disabled(!canDelete)
+    }
+  }
+
+  private func currentStyleName(for kind: OverlayKind) -> String? {
+    kind == .caption
+      ? currentCaptionStyleName
+      : currentTextStyleName
+  }
+
+  private func setCurrentStyleName(
+    _ name: String?,
+    for kind: OverlayKind
+  ) {
+    if kind == .caption {
+      currentCaptionStyleName = name
+    } else {
+      currentTextStyleName = name
+    }
+  }
+
+  private func inspectorSlider(
+    _ title: String,
+    value: Binding<Double>,
+    range: ClosedRange<Double>,
+    displayScale: Double = 1,
+    suffix: String = "",
+    fractionDigits: Int = 0
+  ) -> some View {
+    InspectorValueSlider(
+      title: title,
+      value: value,
+      range: range,
+      displayScale: displayScale,
+      suffix: suffix,
+      fractionDigits: fractionDigits,
+      onEditingStarted: {
+        project.recordUndoCheckpoint()
+      }
+    )
+  }
+
+  private func colorSlider(
+    _ title: String,
+    value: Binding<Double>,
+    range: ClosedRange<Double>
+  ) -> some View {
+    inspectorSlider(
+      title,
+      value: value,
+      range: range,
+      fractionDigits: 2
+    )
+  }
+
+  private func beginSavingStyle(
+    kind: OverlayKind,
+    overlayID: UUID
+  ) {
+    styleNameDraft = nextStyleName(for: kind)
+    pendingStyleSave = PendingStyleSave(
+      kind: kind,
+      overlayID: overlayID
+    )
+  }
+
+  private func savePendingStyle() {
+    guard let pendingStyleSave else { return }
+    let name = styleNameDraft.trimmingCharacters(
+      in: .whitespacesAndNewlines
+    )
+    guard !name.isEmpty else { return }
+    project.saveStyle(
+      named: name,
+      from: pendingStyleSave.overlayID
+    )
+    setCurrentStyleName(name, for: pendingStyleSave.kind)
+    self.pendingStyleSave = nil
+  }
+
+  private func nextStyleName(for kind: OverlayKind) -> String {
+    let existingNames = Set(
+      project.styles(for: kind).map {
+        $0.name.folding(
+          options: [.caseInsensitive, .diacriticInsensitive],
+          locale: .current
+        )
+      }
+    )
+    var index = 1
+    while existingNames.contains(
+      "Мой стиль \(index)".folding(
+        options: [.caseInsensitive, .diacriticInsensitive],
+        locale: .current
+      )
+    ) {
+      index += 1
+    }
+    return "Мой стиль \(index)"
   }
 
   private func captionBinding<Value: Equatable>(
@@ -602,89 +825,92 @@ struct InspectorView: View {
     )
   }
 
-  private func valueSlider(
-    _ title: String,
-    valueText: String,
-    value: Binding<Double>,
-    range: ClosedRange<Double>
-  ) -> some View {
-    VStack(alignment: .leading, spacing: 6) {
-      LabeledContent(title, value: valueText)
-      Slider(
-        value: value,
-        in: range,
-        onEditingChanged: checkpointAtStart
-      )
-      .accessibilityLabel(title)
-      .accessibilityValue(valueText)
-    }
-  }
-
-  private func colorSlider(
-    _ title: String,
-    value: Binding<Double>,
-    range: ClosedRange<Double>
-  ) -> some View {
-    valueSlider(
-      title,
-      valueText: String(format: "%.2f", value.wrappedValue),
-      value: value,
-      range: range
-    )
-  }
-
-  private func layerTitle(_ kind: OverlayKind) -> String {
-    switch kind {
-    case .text: "Текст"
-    case .caption: "Субтитры"
-    case .image: "Изображение"
-    }
-  }
 }
 
-private struct EditableTimeField: View {
-  let value: Double
+private struct PendingStyleSave {
+  let kind: OverlayKind
+  let overlayID: UUID
+}
+
+private struct InspectorValueSlider: View {
+  let title: String
+  @Binding var value: Double
   let range: ClosedRange<Double>
-  let accessibilityLabel: String
-  let onCommit: (Double) -> Void
+  let displayScale: Double
+  let suffix: String
+  let fractionDigits: Int
+  let onEditingStarted: () -> Void
   @State private var draft = ""
   @FocusState private var isFocused: Bool
 
   var body: some View {
-    TextField("0.0", text: $draft)
-      .multilineTextAlignment(.trailing)
-      .monospacedDigit()
-      .frame(width: 74)
-      .focused($isFocused)
-      .onAppear { synchronizeDraft() }
-      .onChange(of: value) {
-        if !isFocused { synchronizeDraft() }
+    VStack(alignment: .leading, spacing: 7) {
+      HStack {
+        Text(title)
+        Spacer()
+        TextField("", text: $draft)
+          .labelsHidden()
+          .textFieldStyle(.roundedBorder)
+          .multilineTextAlignment(.trailing)
+          .monospacedDigit()
+          .frame(width: 72)
+          .focused($isFocused)
+          .onSubmit {
+            commit()
+            isFocused = false
+          }
       }
-      .onChange(of: isFocused) {
-        if !isFocused { commit() }
+      Slider(
+        value: $value,
+        in: range,
+        onEditingChanged: { isEditing in
+          if isEditing {
+            onEditingStarted()
+          }
+        }
+      )
+      .accessibilityLabel(title)
+      .accessibilityValue(formattedValue)
+    }
+    .onAppear { synchronizeDraft() }
+    .onChange(of: value) {
+      if !isFocused {
+        synchronizeDraft()
       }
-      .onSubmit {
+    }
+    .onChange(of: isFocused) {
+      if !isFocused {
         commit()
-        isFocused = false
       }
-      .accessibilityLabel(accessibilityLabel)
-      .help("Введите время в секундах")
+    }
+  }
+
+  private var formattedValue: String {
+    String(
+      format: "%.\(fractionDigits)f",
+      value * displayScale
+    ) + suffix
   }
 
   private func synchronizeDraft() {
-    draft = String(format: "%.1f", value)
+    draft = formattedValue
   }
 
   private func commit() {
-    let normalized = draft.replacingOccurrences(of: ",", with: ".")
+    let normalized = draft
+      .replacingOccurrences(of: suffix, with: "")
+      .replacingOccurrences(of: ",", with: ".")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
     guard let parsed = Double(normalized) else {
       synchronizeDraft()
       return
     }
-    let clamped = min(max(parsed, range.lowerBound), range.upperBound)
+    let rawValue = parsed / max(displayScale, 0.0001)
+    let clamped = min(max(rawValue, range.lowerBound), range.upperBound)
     if abs(clamped - value) > 0.0001 {
-      onCommit(clamped)
+      onEditingStarted()
+      value = clamped
     }
-    draft = String(format: "%.1f", clamped)
+    synchronizeDraft()
   }
 }

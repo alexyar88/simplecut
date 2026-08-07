@@ -9,6 +9,9 @@ struct RecordView: View {
   @State private var isFinalizing = false
   @State private var showGrid = true
   @State private var teleprompterStartedAt: Date?
+  @State private var devicesExpanded = false
+  @State private var recordingExpanded = false
+  @State private var teleprompterAppearanceExpanded = false
   @AppStorage("recording.countdownSeconds.v2") private var countdownSeconds = 0
   @AppStorage("teleprompter.enabled") private var teleprompterEnabled = false
   @AppStorage("teleprompter.text") private var teleprompterText = ""
@@ -16,13 +19,12 @@ struct RecordView: View {
   @AppStorage("teleprompter.speed.v2") private var teleprompterSpeed = 90.0
   @AppStorage("teleprompter.backgroundOpacity")
   private var teleprompterBackgroundOpacity = 0.42
-  @AppStorage("teleprompter.mirrored") private var teleprompterMirrored = false
 
   var body: some View {
     VStack(spacing: 16) {
       statusBar
       HStack(alignment: .top, spacing: 20) {
-        preview
+        previewColumn
         settingsPanel
       }
     }
@@ -31,6 +33,7 @@ struct RecordView: View {
     .background(Color(nsColor: .windowBackgroundColor))
     .task {
       await recorder.startPreview()
+      devicesExpanded = recorder.cameras.isEmpty || recorder.microphones.isEmpty
     }
     .onChange(of: recorder.selectedCameraID) {
       recorder.reconfigure()
@@ -92,18 +95,17 @@ struct RecordView: View {
           .foregroundStyle(.secondary)
       }
       Spacer()
-      VStack(alignment: .trailing, spacing: 4) {
-        HStack(spacing: 8) {
-          Text("Уровень микрофона")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-          AudioLevelMeter(level: recorder.microphoneLevel)
-            .frame(width: 150, height: 10)
-        }
-      }
     }
     .frame(minHeight: 34)
     .accessibilityElement(children: .combine)
+  }
+
+  private var previewColumn: some View {
+    VStack(spacing: 10) {
+      preview
+      frameControls
+    }
+    .frame(maxWidth: 560)
   }
 
   private var preview: some View {
@@ -124,23 +126,25 @@ struct RecordView: View {
           .accessibilityHidden(true)
       }
 
-      VStack {
-        HStack {
-          Label(
-            recorder.selectedCamera?.localizedName ?? "Камера не выбрана",
-            systemImage: "video.fill"
-          )
-          .font(.caption)
-          .lineLimit(1)
-          .padding(.horizontal, 9)
-          .padding(.vertical, 6)
-          .background(.black.opacity(0.58), in: Capsule())
-          .foregroundStyle(.white)
+      if !recorder.isRecording, !recorder.isStartingRecording {
+        VStack {
+          HStack {
+            Label(
+              recorder.selectedCamera?.localizedName ?? "Камера не выбрана",
+              systemImage: "video.fill"
+            )
+            .font(.caption)
+            .lineLimit(1)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(.black.opacity(0.58), in: Capsule())
+            .foregroundStyle(.white)
+            Spacer()
+          }
           Spacer()
         }
-        Spacer()
+        .padding(12)
       }
-      .padding(12)
 
       if teleprompterEnabled, !teleprompterText.trimmed.isEmpty {
         teleprompterOverlay
@@ -162,7 +166,7 @@ struct RecordView: View {
         .stroke(.white.opacity(0.1))
     }
     .aspectRatio(project.canvas.aspectRatio, contentMode: .fit)
-    .frame(maxWidth: 560, maxHeight: 590)
+    .frame(maxWidth: 560, maxHeight: 560)
     .animation(.snappy, value: recorder.countdown)
   }
 
@@ -172,141 +176,193 @@ struct RecordView: View {
       fontSize: teleprompterFontSize,
       wordsPerMinute: teleprompterSpeed,
       backgroundOpacity: teleprompterBackgroundOpacity,
-      isMirrored: teleprompterMirrored,
       isRunning: recorder.isRecording,
       startedAt: teleprompterStartedAt
     )
     .accessibilityHidden(true)
   }
 
-  private var settingsPanel: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 12) {
-        devicesCard
-        imageCard
-        recordingCard
-        teleprompterCard
-        recordAction
-      }
-      .padding(.trailing, 4)
-    }
-    .scrollIndicators(.visible)
-    .frame(width: 400)
-  }
-
-  private var devicesCard: some View {
-    settingsCard("1. Устройства", systemImage: "video.badge.checkmark") {
-      devicePicker(
-        title: "Камера",
-        selection: $recorder.selectedCameraID,
-        devices: recorder.cameras
-      )
-      devicePicker(
-        title: "Микрофон",
-        selection: $recorder.selectedMicrophoneID,
-        devices: recorder.microphones
-      )
-      HStack {
-        Button {
-          recorder.refreshDevices()
-          recorder.reconfigure()
-        } label: {
-          Label("Обновить устройства", systemImage: "arrow.clockwise")
+  private var frameControls: some View {
+    HStack(spacing: 8) {
+      Picker("Масштаб кадра", selection: $recorder.previewMode) {
+        ForEach(CapturePreviewMode.allCases) { mode in
+          Text(mode.title).tag(mode)
         }
-        .buttonStyle(.plain)
-        Spacer()
-        Text(recorder.microphones.isEmpty ? "Нет сигнала" : "Сигнал активен")
-          .font(.caption)
-          .foregroundStyle(
-            recorder.microphones.isEmpty ? Color.orange : Color.green
-          )
       }
+      .pickerStyle(.segmented)
+      .labelsHidden()
+      .frame(maxWidth: 190)
+
+      Button {
+        recorder.rotateClockwise()
+      } label: {
+        Image(systemName: "rotate.right")
+          .frame(width: 18)
+      }
+      .accessibilityLabel("Повернуть на 90 градусов")
+      .help("Повернуть на 90°")
+
+      Button {
+        recorder.toggleMirroring()
+      } label: {
+        Image(systemName: "arrowtriangle.left.and.line.vertical.and.arrowtriangle.right")
+          .frame(width: 18)
+      }
+      .tint(recorder.isMirrored ? .accentColor : nil)
+      .accessibilityLabel("Отразить по горизонтали")
+      .help("Отразить по горизонтали")
+
+      Toggle("Сетка", isOn: $showGrid)
+        .toggleStyle(.switch)
+        .controlSize(.small)
     }
+    .buttonStyle(.bordered)
+    .padding(.horizontal, 10)
+    .padding(.vertical, 8)
+    .frame(maxWidth: .infinity)
+    .background(EditorTheme.raised.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
     .disabled(configurationLocked)
   }
 
-  private var imageCard: some View {
-    settingsCard("2. Кадр", systemImage: "crop") {
-      VStack(alignment: .leading, spacing: 6) {
-        Text("Масштаб кадра")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-        Picker("Масштаб кадра", selection: $recorder.previewMode) {
-          ForEach(CapturePreviewMode.allCases) { mode in
-            Text(mode.title).tag(mode)
+  private var settingsPanel: some View {
+    VStack(spacing: 10) {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 10) {
+          devicesCard
+          recordingCard
+          teleprompterCard
+        }
+        .padding(.trailing, 4)
+      }
+      .scrollIndicators(.visible)
+
+      Divider()
+      recordAction
+    }
+    .frame(width: 420)
+  }
+
+  private var devicesCard: some View {
+    collapsibleSettingsCard(isExpanded: $devicesExpanded) {
+      HStack(spacing: 10) {
+        Label("Устройства", systemImage: "video.badge.checkmark")
+          .font(.headline)
+        Spacer()
+        if !devicesExpanded {
+          AudioLevelMeter(level: recorder.microphoneLevel)
+            .frame(width: 64, height: 8)
+          Image(
+            systemName: recorder.cameras.isEmpty || recorder.microphones.isEmpty
+              ? "exclamationmark.circle.fill" : "checkmark.circle.fill"
+          )
+          .foregroundStyle(
+            recorder.cameras.isEmpty || recorder.microphones.isEmpty
+              ? Color.orange : Color.green
+          )
+        }
+      }
+    } content: {
+      VStack(alignment: .leading, spacing: 10) {
+        devicePicker(
+          title: "Камера",
+          selection: $recorder.selectedCameraID,
+          devices: recorder.cameras
+        )
+        devicePicker(
+          title: "Микрофон",
+          selection: $recorder.selectedMicrophoneID,
+          devices: recorder.microphones
+        )
+        HStack(spacing: 8) {
+          Text("Уровень")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          AudioLevelMeter(level: recorder.microphoneLevel)
+            .frame(height: 9)
+          Button {
+            recorder.refreshDevices()
+            recorder.reconfigure()
+          } label: {
+            Image(systemName: "arrow.clockwise")
           }
+          .buttonStyle(.plain)
+          .help("Обновить устройства")
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
       }
-      HStack(spacing: 8) {
-        Button {
-          recorder.rotateClockwise()
-        } label: {
-          Label("Повернуть 90°", systemImage: "rotate.right")
-        }
-        Button {
-          recorder.toggleMirroring()
-        } label: {
-          Label("Отразить", systemImage: "arrow.left.and.right")
-        }
-        .tint(recorder.isMirrored ? .accentColor : nil)
-      }
-      .buttonStyle(.bordered)
-        Toggle("Сетка 3×3", isOn: $showGrid)
-          .toggleStyle(.switch)
-          .controlSize(.small)
     }
     .disabled(configurationLocked)
   }
 
   private var recordingCard: some View {
-    settingsCard("3. Запись", systemImage: "slider.horizontal.3") {
+    collapsibleSettingsCard(isExpanded: $recordingExpanded) {
       HStack {
-        labeledPicker("Качество", selection: $recorder.quality) {
-          ForEach(CaptureQuality.allCases) { quality in
-            Text(quality.title).tag(quality)
-          }
-        }
-        labeledPicker("Частота", selection: $recorder.frameRate) {
-          ForEach(CaptureFrameRate.allCases) { rate in
-            Text(rate.title).tag(rate)
-          }
-        }
-        labeledPicker("Отсчёт", selection: $countdownSeconds) {
-          Text("Без отсчёта").tag(0)
-          Text("3 с").tag(3)
-          Text("5 с").tag(5)
-        }
-      }
-      HStack {
-        VStack(alignment: .leading, spacing: 2) {
-          Text("Папка сохранения")
+        Label("Запись", systemImage: "slider.horizontal.3")
+          .font(.headline)
+        Spacer()
+        if !recordingExpanded {
+          Text(recordingSummary)
             .font(.caption)
             .foregroundStyle(.secondary)
-          Text(recorder.outputDirectory?.lastPathComponent ?? "Медиатека SimpleCut")
             .lineLimit(1)
         }
-        Spacer()
-        Button("Выбрать…", action: chooseOutputDirectory)
       }
-      Text(storageEstimate)
-        .font(.caption)
-        .foregroundStyle(.secondary)
+    } content: {
+      VStack(alignment: .leading, spacing: 10) {
+        HStack {
+          labeledPicker("Качество", selection: $recorder.quality) {
+            ForEach(CaptureQuality.allCases) { quality in
+              Text(quality.title).tag(quality)
+            }
+          }
+          labeledPicker("Частота", selection: $recorder.frameRate) {
+            ForEach(CaptureFrameRate.allCases) { rate in
+              Text(rate.title).tag(rate)
+            }
+          }
+          labeledPicker("Отсчёт", selection: $countdownSeconds) {
+            Text("Без отсчёта").tag(0)
+            Text("3 с").tag(3)
+            Text("5 с").tag(5)
+          }
+        }
+        HStack {
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Папка сохранения")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+            Text(recorder.outputDirectory?.lastPathComponent ?? "Медиатека SimpleCut")
+              .lineLimit(1)
+          }
+          Spacer()
+          Button("Выбрать…", action: chooseOutputDirectory)
+        }
+        Text(storageEstimate)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
     }
     .disabled(configurationLocked)
   }
 
   private var teleprompterCard: some View {
-    settingsCard("4. Суфлёр", systemImage: "text.alignleft") {
-      Toggle("Показывать текст поверх предпросмотра", isOn: $teleprompterEnabled)
-        .toggleStyle(.switch)
+    VStack(alignment: .leading, spacing: 11) {
+      HStack {
+        Label("Суфлёр", systemImage: "text.alignleft")
+          .font(.headline)
+        Spacer()
+        Toggle("Суфлёр", isOn: $teleprompterEnabled)
+          .labelsHidden()
+          .toggleStyle(.switch)
+          .accessibilityLabel("Суфлёр")
+      }
+      .contentShape(Rectangle())
+
       if teleprompterEnabled {
         TextEditor(text: $teleprompterText)
           .font(.body)
           .scrollContentBackground(.hidden)
-          .padding(6)
-          .frame(height: 105)
+          .padding(8)
+          .frame(minHeight: 230)
           .background(EditorTheme.raised, in: RoundedRectangle(cornerRadius: 8))
           .overlay {
             if teleprompterText.isEmpty {
@@ -317,46 +373,54 @@ struct RecordView: View {
                 .allowsHitTesting(false)
             }
           }
-        HStack {
-          compactStepper(
-            title: "Шрифт",
+        HStack(spacing: 14) {
+          compactSlider(
+            title: "Размер",
             value: $teleprompterFontSize,
             range: 8...52,
             step: 2,
             valueLabel: "\(Int(teleprompterFontSize))"
           )
-          compactStepper(
-            title: "Слов в минуту",
+          compactSlider(
+            title: "Скорость",
             value: $teleprompterSpeed,
             range: 30...240,
             step: 10,
-            valueLabel: "\(Int(teleprompterSpeed))"
+            valueLabel: "\(Int(teleprompterSpeed)) слов/мин"
           )
         }
-        VStack(alignment: .leading, spacing: 5) {
-          HStack {
-            Text("Прозрачность фона")
-            Spacer()
-            Text("\(Int((1 - teleprompterBackgroundOpacity) * 100))%")
-              .monospacedDigit()
+        DisclosureGroup("Настроить вид", isExpanded: $teleprompterAppearanceExpanded) {
+          VStack(alignment: .leading, spacing: 5) {
+            HStack {
+              Text("Затемнение под текстом")
+              Spacer()
+              Text("\(Int(teleprompterBackgroundOpacity * 100))%")
+                .monospacedDigit()
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Slider(
+              value: $teleprompterBackgroundOpacity,
+              in: 0.15...0.85
+            )
           }
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          Slider(
-            value: Binding(
-              get: { 1 - teleprompterBackgroundOpacity },
-              set: { teleprompterBackgroundOpacity = 1 - $0 }
-            ),
-            in: 0.15...1
-          )
+          .padding(.top, 8)
         }
-        Toggle("Зеркально для физического суфлёра", isOn: $teleprompterMirrored)
-          .toggleStyle(.switch)
-          .controlSize(.small)
-        Text("Текст прокручивается после начала записи и не попадает в видео.")
+        .font(.caption)
+        Text(teleprompterStats)
           .font(.caption)
           .foregroundStyle(.secondary)
       }
+    }
+    .padding(13)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      Color(nsColor: .controlBackgroundColor),
+      in: RoundedRectangle(cornerRadius: 11)
+    )
+    .overlay {
+      RoundedRectangle(cornerRadius: 11)
+        .stroke(.white.opacity(0.045))
     }
   }
 
@@ -393,6 +457,7 @@ struct RecordView: View {
       }
     }
     .padding(.top, 2)
+    .background(Color(nsColor: .windowBackgroundColor))
   }
 
   private func settingsCard<Content: View>(
@@ -405,15 +470,15 @@ struct RecordView: View {
         .font(.headline)
       content()
     }
-    .padding(15)
+    .padding(13)
     .frame(maxWidth: .infinity, alignment: .leading)
     .background(
       Color(nsColor: .controlBackgroundColor),
-      in: RoundedRectangle(cornerRadius: 12)
+      in: RoundedRectangle(cornerRadius: 11)
     )
     .overlay {
-      RoundedRectangle(cornerRadius: 12)
-        .stroke(.white.opacity(0.06))
+      RoundedRectangle(cornerRadius: 11)
+        .stroke(.white.opacity(0.045))
     }
   }
 
@@ -456,7 +521,7 @@ struct RecordView: View {
     }
   }
 
-  private func compactStepper(
+  private func compactSlider(
     title: String,
     value: Binding<Double>,
     range: ClosedRange<Double>,
@@ -464,26 +529,38 @@ struct RecordView: View {
     valueLabel: String
   ) -> some View {
     VStack(alignment: .leading, spacing: 4) {
-      Text(title)
-        .font(.caption)
-        .foregroundStyle(.secondary)
-      HStack(spacing: 6) {
-        Button {
-          value.wrappedValue = max(range.lowerBound, value.wrappedValue - step)
-        } label: {
-          Image(systemName: "minus")
-        }
+      HStack {
+        Text(title)
+          .foregroundStyle(.secondary)
+        Spacer()
         Text(valueLabel)
           .monospacedDigit()
-          .frame(minWidth: 28)
-        Button {
-          value.wrappedValue = min(range.upperBound, value.wrappedValue + step)
-        } label: {
-          Image(systemName: "plus")
-        }
       }
-      .buttonStyle(.bordered)
-      .controlSize(.small)
+      .font(.caption)
+      Slider(value: value, in: range, step: step)
+    }
+  }
+
+  private func collapsibleSettingsCard<LabelContent: View, Content: View>(
+    isExpanded: Binding<Bool>,
+    @ViewBuilder label: @escaping () -> LabelContent,
+    @ViewBuilder content: @escaping () -> Content
+  ) -> some View {
+    DisclosureGroup(isExpanded: isExpanded) {
+      content()
+        .padding(.top, 10)
+    } label: {
+      label()
+    }
+    .padding(13)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      Color(nsColor: .controlBackgroundColor),
+      in: RoundedRectangle(cornerRadius: 11)
+    )
+    .overlay {
+      RoundedRectangle(cornerRadius: 11)
+        .stroke(.white.opacity(0.045))
     }
   }
 
@@ -546,7 +623,7 @@ struct RecordView: View {
     if recorder.cameras.isEmpty || recorder.microphones.isEmpty {
       return "Нужно выбрать устройства"
     }
-    return "Камера и микрофон готовы"
+    return "Готово к записи"
   }
 
   private var statusDetail: String {
@@ -558,7 +635,7 @@ struct RecordView: View {
     }
     if recorder.cameras.isEmpty { return "Камера не найдена" }
     if recorder.microphones.isEmpty { return "Микрофон не найден" }
-    return "Проверьте кадр и уровень звука перед началом"
+    return "Проверьте кадр и звук"
   }
 
   private var statusColor: Color {
@@ -593,17 +670,31 @@ struct RecordView: View {
     return "Доступно примерно \(max(0, minutes)) мин записи в выбранном качестве."
   }
 
+  private var recordingSummary: String {
+    let countdown = countdownSeconds == 0 ? "без отсчёта" : "\(countdownSeconds) с"
+    return "\(recorder.quality.title) · \(recorder.frameRate.title) · \(countdown)"
+  }
+
+  private var teleprompterStats: String {
+    let words = teleprompterText.split(whereSeparator: \.isWhitespace).count
+    guard words > 0 else { return "0 слов" }
+    let duration = Double(words) / max(30, teleprompterSpeed) * 60
+    let minutes = Int(duration) / 60
+    let seconds = Int(duration) % 60
+    return "\(words) слов · ≈ \(minutes):\(String(format: "%02d", seconds))"
+  }
+
   private var recordButtonTitle: String {
     if recorder.isRecording { return "Остановить запись" }
     if recorder.isStartingRecording { return "Остановить запись" }
     if recorder.countdown != nil { return "Отменить отсчёт" }
-    return teleprompterEnabled ? "Начать запись с суфлёром" : "Начать запись"
+    return "Начать запись"
   }
 
   private var recordButtonSystemImage: String {
     if recorder.isRecording || recorder.isStartingRecording { return "stop.fill" }
     if recorder.countdown != nil { return "xmark" }
-    return teleprompterEnabled ? "text.bubble.fill" : "record.circle"
+    return "record.circle"
   }
 }
 
@@ -630,7 +721,6 @@ private struct TeleprompterOverlay: View {
   let fontSize: Double
   let wordsPerMinute: Double
   let backgroundOpacity: Double
-  let isMirrored: Bool
   let isRunning: Bool
   let startedAt: Date?
 
@@ -651,7 +741,7 @@ private struct TeleprompterOverlay: View {
             .foregroundStyle(.white)
             .shadow(color: .black.opacity(0.9), radius: 3)
             .padding(.horizontal, 22)
-            .padding(.top, 18)
+            .padding(.top, 14)
             .padding(.bottom, offset + 80)
             .frame(maxWidth: .infinity)
             .fixedSize(horizontal: false, vertical: true)
@@ -660,7 +750,11 @@ private struct TeleprompterOverlay: View {
         .scrollIndicators(isRunning ? .hidden : .visible)
         .scrollDisabled(isRunning)
       }
-      .frame(maxWidth: .infinity, maxHeight: 210, alignment: .top)
+      .frame(
+        maxWidth: .infinity,
+        maxHeight: 225,
+        alignment: .top
+      )
       .background(
         LinearGradient(
           colors: [
@@ -672,7 +766,6 @@ private struct TeleprompterOverlay: View {
           endPoint: .bottom
         )
       )
-      .scaleEffect(x: isMirrored ? -1 : 1, y: 1)
       Spacer()
     }
   }

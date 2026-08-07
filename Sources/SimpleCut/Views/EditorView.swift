@@ -55,9 +55,7 @@ struct EditorView: View {
               .opacity(project.clips.isEmpty ? 0 : 1)
             Divider()
             TimelineView()
-              .frame(
-                height: project.overlays.isEmpty ? 222 : 264
-              )
+              .frame(height: timelineHeight)
           }
           InspectorView()
         }
@@ -209,6 +207,11 @@ struct EditorView: View {
       guard !project.isBusy else { return }
       requestProjectAction(.openURL(url))
     }
+  }
+
+  private var timelineHeight: CGFloat {
+    222
+      + CGFloat(OverlayKind.timelineKinds(for: project.overlays).count) * 42
   }
 
   private var toolbar: some View {
