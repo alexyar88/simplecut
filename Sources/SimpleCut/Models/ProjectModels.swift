@@ -693,6 +693,14 @@ enum TimelineInteractionGeometry {
     let ratio = min(1, max(0, x / width))
     return Double(ratio) * duration
   }
+
+  static func snappedX(
+    _ x: CGFloat,
+    targetX: CGFloat,
+    threshold: CGFloat
+  ) -> CGFloat {
+    abs(x - targetX) <= max(0, threshold) ? targetX : x
+  }
 }
 
 enum TrimPreviewGeometry {

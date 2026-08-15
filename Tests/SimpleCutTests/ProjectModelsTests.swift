@@ -32,6 +32,37 @@ final class ProjectModelsTests: XCTestCase {
       TimelineInteractionGeometry.time(at: 600, width: 400, duration: 10),
       10
     )
+    XCTAssertEqual(
+      TimelineInteractionGeometry.snappedX(104, targetX: 110, threshold: 7),
+      110
+    )
+    XCTAssertEqual(
+      TimelineInteractionGeometry.snappedX(102, targetX: 110, threshold: 7),
+      102
+    )
+  }
+
+  @MainActor
+  func testSkimmingKeepsAnchoredPlayheadUntilPositionIsCommitted() {
+    let project = EditorProject(loadRecovery: false)
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/skimming-state.mov"),
+        sourceStart: 0,
+        duration: 6
+      )
+    ]
+
+    project.seek(to: 2)
+    project.scrub(to: 4)
+
+    XCTAssertEqual(project.playhead, 4)
+    XCTAssertEqual(project.playback.anchoredPlayhead, 2)
+
+    project.seek(to: 3)
+
+    XCTAssertEqual(project.playhead, 3)
+    XCTAssertEqual(project.playback.anchoredPlayhead, 3)
   }
 
   @MainActor

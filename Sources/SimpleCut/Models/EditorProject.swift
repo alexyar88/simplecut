@@ -135,7 +135,10 @@ final class EditorProject: ObservableObject {
 
   var playhead: Double {
     get { playback.playhead }
-    set { playback.playhead = newValue }
+    set {
+      playback.playhead = newValue
+      playback.anchoredPlayhead = newValue
+    }
   }
 
   var displayName: String {
@@ -1140,13 +1143,22 @@ final class EditorProject: ObservableObject {
   /// still uses zero tolerance through `seek(to:)`.
   func scrub(to time: Double) {
     let frame = CMTime(value: 1, timescale: 30)
-    seek(to: time, tolerance: frame)
+    seek(to: time, tolerance: frame, commitsPosition: false)
   }
 
-  private func seek(to time: Double, tolerance: CMTime) {
-    playhead = min(max(0, time), duration)
+  private func seek(
+    to time: Double,
+    tolerance: CMTime,
+    commitsPosition: Bool = true
+  ) {
+    let clampedTime = min(max(0, time), duration)
+    if commitsPosition {
+      playhead = clampedTime
+    } else {
+      playback.playhead = clampedTime
+    }
     let previewTime = Self.previewTime(
-      for: playhead,
+      for: clampedTime,
       duration: duration
     )
     requestPlayerSeek(
@@ -1234,8 +1246,13 @@ final class EditorProject: ObservableObject {
   func togglePlayback() {
     if player.timeControlStatus == .playing {
       player.pause()
+      let stoppedTime = player.currentTime().seconds
+      if stoppedTime.isFinite {
+        playhead = min(max(0, stoppedTime), duration)
+      }
       playback.isPlaying = false
     } else {
+      playback.anchoredPlayhead = playhead
       if playhead >= duration - 0.05 { seek(to: 0) }
       player.play()
       playback.isPlaying = true

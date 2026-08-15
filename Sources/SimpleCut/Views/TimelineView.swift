@@ -20,6 +20,7 @@ struct TimelineView: View {
   @State private var timelineContentMinX: CGFloat = 0
   private let maximumTimelineZoom = 64.0
   private let clipGap: CGFloat = 10
+  private let playheadSnapDistance: CGFloat = 7
 
   var body: some View {
     Group {
@@ -93,7 +94,8 @@ struct TimelineView: View {
               playback: playback,
               duration: project.duration,
               contentWidth: contentWidth,
-              hoveredX: hoveredTimelineX
+              hoveredX: hoveredTimelineX,
+              snapDistance: playheadSnapDistance
             )
           }
         }
@@ -102,19 +104,26 @@ struct TimelineView: View {
         .onPreferenceChange(TimelineContentMinXPreferenceKey.self) { minX in
           timelineContentMinX = minX
         }
-        .onContinuousHover { phase in
-          switch phase {
-          case .active(let location):
-            let contentX = TimelineInteractionGeometry.contentX(
-              viewportX: location.x,
-              contentMinX: timelineContentMinX
-            )
-            hoveredTimelineX = min(max(0, contentX), contentWidth)
-            skimTimeline(at: contentX, width: contentWidth)
-          case .ended:
-            lastSkimmedFrame = nil
-            hoveredTimelineX = nil
-          }
+        .overlay {
+          TimelinePointerTrackingView(
+            onMoved: { viewportX in
+              let contentX = TimelineInteractionGeometry.contentX(
+                viewportX: viewportX,
+                contentMinX: timelineContentMinX
+              )
+              let clampedX = min(max(0, contentX), contentWidth)
+              hoveredTimelineX = clampedX
+              skimTimeline(
+                at: snappedTimelineX(clampedX, width: contentWidth),
+                width: contentWidth
+              )
+            },
+            onExited: {
+              lastSkimmedFrame = nil
+              hoveredTimelineX = nil
+            }
+          )
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .simultaneousGesture(
           SpatialTapGesture(coordinateSpace: .local)
@@ -125,7 +134,7 @@ struct TimelineView: View {
                 contentMinX: timelineContentMinX
               )
               let time = TimelineInteractionGeometry.time(
-                at: contentX,
+                at: snappedTimelineX(contentX, width: contentWidth),
                 width: contentWidth,
                 duration: project.duration
               )
@@ -434,7 +443,8 @@ struct TimelineView: View {
   }
 
   private func selectClipAndSeek(x: CGFloat, width: CGFloat) {
-    let ratio = min(1, max(0, x / max(width, 1)))
+    let snappedX = snappedTimelineX(x, width: width)
+    let ratio = min(1, max(0, snappedX / max(width, 1)))
     let time = ratio * project.duration
     var cursor = 0.0
     if let clip = project.clips.enumerated().first(where: { index, clip in
@@ -452,16 +462,39 @@ struct TimelineView: View {
   }
 
   private func skimTimeline(at x: CGFloat, width: CGFloat) {
-    guard !isTrimming, activeOverlayID == nil else { return }
+    guard !playback.isPlaying, !isTrimming, activeOverlayID == nil else {
+      return
+    }
     let time = TimelineInteractionGeometry.time(
       at: x,
       width: width,
       duration: project.duration
     )
     let frame = Int((time * 30).rounded(.down))
-    guard frame != lastSkimmedFrame else { return }
+    let anchoredX = project.duration > 0
+      ? width * playback.anchoredPlayhead / project.duration
+      : 0
+    let isSnappedToPlayhead = abs(x - anchoredX) < 0.5
+    guard frame != lastSkimmedFrame
+      || (isSnappedToPlayhead
+        && abs(playback.playhead - playback.anchoredPlayhead) > 0.0001)
+    else { return }
     lastSkimmedFrame = frame
-    project.scrub(to: min(project.duration, Double(frame) / 30))
+    let scrubTime = isSnappedToPlayhead
+      ? playback.anchoredPlayhead
+      : min(project.duration, Double(frame) / 30)
+    project.scrub(to: scrubTime)
+  }
+
+  private func snappedTimelineX(_ x: CGFloat, width: CGFloat) -> CGFloat {
+    let clampedX = min(max(0, x), max(0, width))
+    guard !playback.isPlaying, project.duration > 0 else { return clampedX }
+    let anchoredX = width * playback.anchoredPlayhead / project.duration
+    return TimelineInteractionGeometry.snappedX(
+      clampedX,
+      targetX: anchoredX,
+      threshold: playheadSnapDistance
+    )
   }
 
   private func adjustZoom(by delta: Double) {
@@ -485,10 +518,6 @@ struct TimelineView: View {
     trackSize: CGSize
   ) -> some View {
     let isSelected = project.isClipSelected(clip.id)
-    let showsTrimHandles =
-      (project.selectedClipID == clip.id
-        && project.selectedClipIDs.count == 1)
-      || hoveredClipID == clip.id
     let pixelsPerSecond =
       trackSize.width / max(project.duration, 0.01)
     let thumbnailAdjustment = trimDrag(
@@ -514,21 +543,22 @@ struct TimelineView: View {
       )
       clipMetadata(clip: clip, index: index, width: width)
 
-      if showsTrimHandles {
-        HStack {
-          trimHandle(
-            clip: clip,
-            edge: .leading,
-            pixelsPerSecond: pixelsPerSecond
-          )
-          Spacer(minLength: 0)
-          trimHandle(
-            clip: clip,
-            edge: .trailing,
-            pixelsPerSecond: pixelsPerSecond
-          )
-        }
+      // Keep the invisible edge hit areas alive for every clip. Creating them
+      // only after hover meant a newly split clip could miss the cursor event.
+      HStack {
+        trimHandle(
+          clip: clip,
+          edge: .leading,
+          pixelsPerSecond: pixelsPerSecond
+        )
+        Spacer(minLength: 0)
+        trimHandle(
+          clip: clip,
+          edge: .trailing,
+          pixelsPerSecond: pixelsPerSecond
+        )
       }
+      .zIndex(2)
       if activeTrimClipID == clip.id {
         VStack {
           Text(
@@ -548,6 +578,7 @@ struct TimelineView: View {
           isSelected ? Color.accentColor : Color.white.opacity(0.22),
           lineWidth: isSelected ? 1.5 : 0.75
         )
+        .allowsHitTesting(false)
     }
   }
 
@@ -1198,6 +1229,14 @@ struct TimelineView: View {
             resetOverlayGesture()
           }
       )
+      .onContinuousHover { phase in
+        switch phase {
+        case .active:
+          NSCursor.resizeLeftRight.set()
+        case .ended:
+          NSCursor.arrow.set()
+        }
+      }
       .help(
         edge == .leading
           ? "Изменить начало слоя"
@@ -1222,6 +1261,76 @@ struct TimelineView: View {
     case .caption: item.text ?? "Субтитры"
     case .image: "Изображение"
     }
+  }
+}
+
+/// Tracks pointer movement over the whole timeline independently from SwiftUI
+/// hit testing. Child gestures (clip trims, captions, images, and text layers)
+/// can therefore never starve the global skimmer of mouse-moved events.
+private struct TimelinePointerTrackingView: NSViewRepresentable {
+  let onMoved: (CGFloat) -> Void
+  let onExited: () -> Void
+
+  func makeNSView(context: Context) -> TimelinePointerTrackingNSView {
+    let view = TimelinePointerTrackingNSView()
+    view.onMoved = onMoved
+    view.onExited = onExited
+    return view
+  }
+
+  func updateNSView(
+    _ nsView: TimelinePointerTrackingNSView,
+    context: Context
+  ) {
+    nsView.onMoved = onMoved
+    nsView.onExited = onExited
+  }
+}
+
+private final class TimelinePointerTrackingNSView: NSView {
+  var onMoved: ((CGFloat) -> Void)?
+  var onExited: (() -> Void)?
+  private var pointerTrackingArea: NSTrackingArea?
+
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas()
+    if let pointerTrackingArea {
+      removeTrackingArea(pointerTrackingArea)
+    }
+    let trackingArea = NSTrackingArea(
+      rect: .zero,
+      options: [
+        .mouseEnteredAndExited,
+        .mouseMoved,
+        .activeInKeyWindow,
+        .inVisibleRect,
+      ],
+      owner: self,
+      userInfo: nil
+    )
+    addTrackingArea(trackingArea)
+    pointerTrackingArea = trackingArea
+  }
+
+  override func mouseEntered(with event: NSEvent) {
+    reportPointerLocation(from: event)
+  }
+
+  override func mouseMoved(with event: NSEvent) {
+    reportPointerLocation(from: event)
+  }
+
+  override func mouseExited(with event: NSEvent) {
+    onExited?()
+  }
+
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    nil
+  }
+
+  private func reportPointerLocation(from event: NSEvent) {
+    let location = convert(event.locationInWindow, from: nil)
+    onMoved?(min(max(0, location.x), bounds.width))
   }
 }
 
@@ -1263,29 +1372,53 @@ private struct TimelineGlobalPlayhead: View {
   let duration: Double
   let contentWidth: CGFloat
   let hoveredX: CGFloat?
+  let snapDistance: CGFloat
 
   var body: some View {
-    // Preview seeking is frame-quantized, but the skimmer must stay exactly
-    // under the pointer even when a single frame is very wide at high zoom.
-    let x = hoveredX ?? (
-      duration > 0
-        ? contentWidth * playback.playhead / duration
-        : 0
-    )
+    let playbackX = duration > 0
+      ? contentWidth * playback.playhead / duration
+      : 0
+    let anchoredX = duration > 0
+      ? contentWidth * playback.anchoredPlayhead / duration
+      : 0
+    let isSnapped = !playback.isPlaying
+      && hoveredX.map { abs($0 - anchoredX) <= snapDistance } == true
+    let skimmerX = hoveredX.map {
+      isSnapped ? anchoredX : $0
+    }
+    let activeX = playback.isPlaying ? playbackX : skimmerX
     GeometryReader { proxy in
       ZStack(alignment: .topLeading) {
-        Rectangle()
-          .fill(.white.opacity(0.96))
-          .frame(width: 1.5, height: proxy.size.height)
-          .offset(x: min(max(0, x - 0.75), contentWidth - 1.5))
-          .shadow(color: .black.opacity(0.7), radius: 1)
-        Image(systemName: "arrowtriangle.down.fill")
-          .font(.system(size: 9, weight: .bold))
-          .foregroundStyle(.white)
-          .shadow(color: .black.opacity(0.75), radius: 1)
-          .offset(x: min(max(0, x - 4.5), contentWidth - 9), y: 1)
+        if !playback.isPlaying {
+          Rectangle()
+            .fill(Color.gray.opacity(0.58))
+            .frame(width: 1, height: proxy.size.height)
+            .offset(x: min(max(0, anchoredX - 0.5), contentWidth - 1))
+        }
+        if let activeX {
+          let activeColor = isSnapped
+            ? Color.yellow
+            : Color.white.opacity(0.96)
+          Rectangle()
+            .fill(activeColor)
+            .frame(width: 1.5, height: proxy.size.height)
+            .offset(x: min(max(0, activeX - 0.75), contentWidth - 1.5))
+            .shadow(color: .black.opacity(0.7), radius: 1)
+          Image(systemName: "arrowtriangle.down.fill")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(activeColor)
+            .shadow(color: .black.opacity(0.75), radius: 1)
+            .offset(
+              x: min(max(0, activeX - 4.5), contentWidth - 9),
+              y: 1
+            )
+        }
       }
-      .frame(width: contentWidth, height: proxy.size.height)
+      .frame(
+        width: contentWidth,
+        height: proxy.size.height,
+        alignment: .topLeading
+      )
       .allowsHitTesting(false)
       .accessibilityHidden(true)
     }

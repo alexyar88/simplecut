@@ -425,10 +425,13 @@ struct EditorView: View {
       queue: .main
     ) { time in
       Task { @MainActor in
+        let wasPlaying = project.playback.isPlaying
         let isPlaying = project.player.timeControlStatus == .playing
         project.playback.isPlaying = isPlaying
-        if isPlaying {
-          project.playback.playhead = min(time.seconds, project.duration)
+        if isPlaying || wasPlaying {
+          let playhead = min(time.seconds, project.duration)
+          project.playback.playhead = playhead
+          project.playback.anchoredPlayhead = playhead
         }
       }
     }

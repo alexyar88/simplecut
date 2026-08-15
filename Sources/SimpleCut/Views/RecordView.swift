@@ -12,8 +12,7 @@ struct RecordView: View {
   @State private var reviewPlayer: AVPlayer?
   @State private var showGrid = true
   @State private var teleprompterStartedAt: Date?
-  @State private var devicesExpanded = false
-  @State private var recordingExpanded = false
+  @State private var expandedSettingsSection: RecordingSettingsSection? = .teleprompter
   @State private var teleprompterAppearanceExpanded = false
   @State private var textEditingKeyMonitor: Any?
   @AppStorage("recording.countdownSeconds.v2") private var countdownSeconds = 0
@@ -39,7 +38,9 @@ struct RecordView: View {
     .background(Color(nsColor: .windowBackgroundColor))
     .task {
       await recorder.startPreview()
-      devicesExpanded = recorder.cameras.isEmpty || recorder.microphones.isEmpty
+      if recorder.cameras.isEmpty || recorder.microphones.isEmpty {
+        expandedSettingsSection = .devices
+      }
     }
     .onAppear {
       installTextEditingKeyMonitor()
@@ -64,9 +65,11 @@ struct RecordView: View {
     }
     .onChange(of: recorder.isRecording) {
       updateTeleprompterStart()
+      collapseSettingsWhileRecording()
     }
     .onChange(of: recorder.isStartingRecording) {
       updateTeleprompterStart()
+      collapseSettingsWhileRecording()
     }
     .onDisappear {
       reviewPlayer?.pause()
@@ -120,7 +123,10 @@ struct RecordView: View {
         VStack(spacing: 10) {
           statusBar
           previewColumn(size: previewSize)
-          settingsBelowPreview(availableWidth: contentWidth)
+          settingsBelowPreview(
+            availableWidth: contentWidth,
+            previewWidth: previewSize.width
+          )
         }
         .frame(maxWidth: .infinity, alignment: .top)
         .padding(.bottom, 12)
@@ -296,35 +302,46 @@ struct RecordView: View {
       .controlSize(.small)
   }
 
-  @ViewBuilder
-  private func settingsBelowPreview(availableWidth: CGFloat) -> some View {
-    if availableWidth >= 860 {
-      HStack(alignment: .top, spacing: 10) {
-        devicesCard
-          .frame(maxWidth: .infinity)
-        recordingCard
-          .frame(maxWidth: .infinity)
-        teleprompterCard
-          .frame(maxWidth: .infinity)
-      }
-      .frame(maxWidth: 940)
-    } else {
-      VStack(alignment: .leading, spacing: 10) {
-        devicesCard
-        recordingCard
-        teleprompterCard
-      }
-      .frame(maxWidth: 720)
+  private func settingsBelowPreview(
+    availableWidth: CGFloat,
+    previewWidth: CGFloat
+  ) -> some View {
+    let width = min(availableWidth, max(previewWidth, 560))
+
+    return VStack(spacing: 0) {
+      teleprompterCard
+      Divider()
+        .padding(.leading, 42)
+      devicesCard
+      Divider()
+        .padding(.leading, 42)
+      recordingCard
     }
+    .frame(width: width)
+    .background(
+      Color(nsColor: .controlBackgroundColor),
+      in: RoundedRectangle(cornerRadius: 12)
+    )
+    .overlay {
+      RoundedRectangle(cornerRadius: 12)
+        .stroke(.white.opacity(0.055))
+    }
+    .clipShape(RoundedRectangle(cornerRadius: 12))
   }
 
   private var devicesCard: some View {
-    collapsibleSettingsCard(isExpanded: $devicesExpanded) {
+    collapsibleSettingsRow(
+      isExpanded: settingsExpansionBinding(for: .devices)
+    ) {
       HStack(spacing: 10) {
         Label("Устройства", systemImage: "video.badge.checkmark")
           .font(.headline)
         Spacer()
-        if !devicesExpanded {
+        if expandedSettingsSection != .devices {
+          Text(devicesSummary)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
           AudioLevelMeter(level: recorder.microphoneLevel)
             .frame(width: 64, height: 8)
           Image(
@@ -370,12 +387,14 @@ struct RecordView: View {
   }
 
   private var recordingCard: some View {
-    collapsibleSettingsCard(isExpanded: $recordingExpanded) {
+    collapsibleSettingsRow(
+      isExpanded: settingsExpansionBinding(for: .recording)
+    ) {
       HStack {
         Label("Запись", systemImage: "slider.horizontal.3")
           .font(.headline)
         Spacer()
-        if !recordingExpanded {
+        if expandedSettingsSection != .recording {
           Text(recordingSummary)
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -421,82 +440,88 @@ struct RecordView: View {
   }
 
   private var teleprompterCard: some View {
-    VStack(alignment: .leading, spacing: 11) {
-      HStack {
+    collapsibleSettingsRow(
+      isExpanded: settingsExpansionBinding(for: .teleprompter)
+    ) {
+      HStack(spacing: 10) {
         Label("Суфлёр", systemImage: "text.alignleft")
           .font(.headline)
         Spacer()
+        if expandedSettingsSection != .teleprompter {
+          Text(teleprompterSummary)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
         Toggle("Суфлёр", isOn: $teleprompterEnabled)
           .labelsHidden()
           .toggleStyle(.switch)
+          .controlSize(.small)
           .accessibilityLabel("Суфлёр")
       }
-      .contentShape(Rectangle())
-
-      if teleprompterEnabled {
-        TextEditor(text: $teleprompterText)
-          .font(.body)
-          .scrollContentBackground(.hidden)
-          .padding(8)
-          .frame(minHeight: 230)
-          .background(EditorTheme.raised, in: RoundedRectangle(cornerRadius: 8))
-          .overlay {
-            if teleprompterText.isEmpty {
-              Text("Вставьте сюда текст выступления…")
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(12)
-                .allowsHitTesting(false)
+    } content: {
+      VStack(alignment: .leading, spacing: 11) {
+        if teleprompterEnabled {
+          TextEditor(text: $teleprompterText)
+            .font(.body)
+            .scrollContentBackground(.hidden)
+            .padding(8)
+            .frame(minHeight: 250)
+            .background(EditorTheme.raised, in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+              if teleprompterText.isEmpty {
+                Text("Вставьте сюда текст выступления…")
+                  .foregroundStyle(.secondary)
+                  .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                  .padding(12)
+                  .allowsHitTesting(false)
+              }
             }
-          }
-        HStack(spacing: 14) {
-          compactSlider(
-            title: "Размер",
-            value: $teleprompterFontSize,
-            range: 8...52,
-            step: 2,
-            valueLabel: "\(Int(teleprompterFontSize))"
-          )
-          compactSlider(
-            title: "Скорость",
-            value: $teleprompterSpeed,
-            range: 30...240,
-            step: 10,
-            valueLabel: "\(Int(teleprompterSpeed)) слов/мин"
-          )
-        }
-        DisclosureGroup("Настроить вид", isExpanded: $teleprompterAppearanceExpanded) {
-          VStack(alignment: .leading, spacing: 5) {
-            HStack {
-              Text("Затемнение под текстом")
-              Spacer()
-              Text("\(Int(teleprompterBackgroundOpacity * 100))%")
-                .monospacedDigit()
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            Slider(
-              value: $teleprompterBackgroundOpacity,
-              in: 0.15...0.85
+          HStack(spacing: 14) {
+            compactSlider(
+              title: "Размер",
+              value: $teleprompterFontSize,
+              range: 8...52,
+              step: 2,
+              valueLabel: "\(Int(teleprompterFontSize))"
+            )
+            compactSlider(
+              title: "Скорость",
+              value: $teleprompterSpeed,
+              range: 30...240,
+              step: 10,
+              valueLabel: "\(Int(teleprompterSpeed)) слов/мин"
             )
           }
-          .padding(.top, 8)
-        }
-        .font(.caption)
-        Text(teleprompterStats)
+          DisclosureGroup("Настроить вид", isExpanded: $teleprompterAppearanceExpanded) {
+            VStack(alignment: .leading, spacing: 5) {
+              HStack {
+                Text("Затемнение под текстом")
+                Spacer()
+                Text("\(Int(teleprompterBackgroundOpacity * 100))%")
+                  .monospacedDigit()
+              }
+              .font(.caption)
+              .foregroundStyle(.secondary)
+              Slider(
+                value: $teleprompterBackgroundOpacity,
+                in: 0.15...0.85
+              )
+            }
+            .padding(.top, 8)
+          }
           .font(.caption)
-          .foregroundStyle(.secondary)
+          Text(teleprompterStats)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        } else {
+          Text("Включите суфлёр, чтобы добавить текст и настроить его показ поверх камеры.")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+        }
       }
-    }
-    .padding(13)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .background(
-      Color(nsColor: .controlBackgroundColor),
-      in: RoundedRectangle(cornerRadius: 11)
-    )
-    .overlay {
-      RoundedRectangle(cornerRadius: 11)
-        .stroke(.white.opacity(0.045))
     }
   }
 
@@ -693,7 +718,7 @@ struct RecordView: View {
     }
   }
 
-  private func collapsibleSettingsCard<LabelContent: View, Content: View>(
+  private func collapsibleSettingsRow<LabelContent: View, Content: View>(
     isExpanded: Binding<Bool>,
     @ViewBuilder label: @escaping () -> LabelContent,
     @ViewBuilder content: @escaping () -> Content
@@ -706,14 +731,24 @@ struct RecordView: View {
     }
     .padding(13)
     .frame(maxWidth: .infinity, alignment: .leading)
-    .background(
-      Color(nsColor: .controlBackgroundColor),
-      in: RoundedRectangle(cornerRadius: 11)
+    .animation(EditorTheme.softAnimation, value: isExpanded.wrappedValue)
+  }
+
+  private func settingsExpansionBinding(
+    for section: RecordingSettingsSection
+  ) -> Binding<Bool> {
+    Binding(
+      get: { expandedSettingsSection == section },
+      set: { isExpanded in
+        withAnimation(EditorTheme.softAnimation) {
+          if isExpanded {
+            expandedSettingsSection = section
+          } else if expandedSettingsSection == section {
+            expandedSettingsSection = nil
+          }
+        }
+      }
     )
-    .overlay {
-      RoundedRectangle(cornerRadius: 11)
-        .stroke(.white.opacity(0.045))
-    }
   }
 
   private func toggleRecording() {
@@ -768,6 +803,13 @@ struct RecordView: View {
       teleprompterStartedAt = Date()
     } else if !active {
       teleprompterStartedAt = nil
+    }
+  }
+
+  private func collapseSettingsWhileRecording() {
+    guard recorder.isRecording || recorder.isStartingRecording else { return }
+    withAnimation(EditorTheme.softAnimation) {
+      expandedSettingsSection = nil
     }
   }
 
@@ -893,6 +935,19 @@ struct RecordView: View {
     return "\(recorder.quality.title) · \(recorder.frameRate.title) · \(countdown)"
   }
 
+  private var devicesSummary: String {
+    let camera = recorder.selectedCamera?.localizedName ?? "камера не выбрана"
+    let microphone = recorder.microphones.first {
+      $0.uniqueID == recorder.selectedMicrophoneID
+    }?.localizedName ?? "микрофон не выбран"
+    return "\(camera) · \(microphone)"
+  }
+
+  private var teleprompterSummary: String {
+    guard teleprompterEnabled else { return "выключен" }
+    return "\(Int(teleprompterFontSize)) pt · \(Int(teleprompterSpeed)) слов/мин"
+  }
+
   private var teleprompterStats: String {
     let words = teleprompterText.split(whereSeparator: \.isWhitespace).count
     guard words > 0 else { return "0 слов" }
@@ -914,6 +969,12 @@ struct RecordView: View {
     if recorder.countdown != nil { return "xmark" }
     return "record.circle.fill"
   }
+}
+
+private enum RecordingSettingsSection: Hashable {
+  case teleprompter
+  case devices
+  case recording
 }
 
 private struct RecordingReviewPlayer: NSViewRepresentable {
