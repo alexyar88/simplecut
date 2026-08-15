@@ -61,6 +61,7 @@ enum ExportService {
       throw EditorError.exportFailed
     }
     session.videoComposition = videoComposition
+    session.audioMix = built.audioMix
     session.outputURL = destination
     session.outputFileType = .mp4
     let sessionBox = ExportSessionBox(session)
@@ -101,22 +102,7 @@ enum ExportService {
     let frame = CGRect(origin: .zero, size: canvasSize)
     parent.frame = frame
     video.frame = frame
-    if !color.isNeutral {
-      let controls = CIFilter(name: "CIColorControls")
-      controls?.setValue(color.brightness, forKey: kCIInputBrightnessKey)
-      controls?.setValue(color.contrast, forKey: kCIInputContrastKey)
-      controls?.setValue(color.saturation, forKey: kCIInputSaturationKey)
-      let temperature = CIFilter(name: "CITemperatureAndTint")
-      temperature?.setValue(
-        CIVector(x: 6_500, y: 0),
-        forKey: "inputNeutral"
-      )
-      temperature?.setValue(
-        CIVector(x: 6_500 + color.warmth * 1_500, y: 0),
-        forKey: "inputTargetNeutral"
-      )
-      video.filters = [controls, temperature].compactMap { $0 }
-    }
+    video.filters = ColorPipeline.filters(for: color)
     parent.addSublayer(video)
 
     for item in overlays.inCompositingOrder {

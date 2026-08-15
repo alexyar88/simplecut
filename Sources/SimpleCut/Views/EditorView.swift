@@ -15,6 +15,7 @@ struct EditorView: View {
   @State private var exportTask: Task<Void, Never>?
   @State private var pendingProjectAction: PendingProjectAction?
   @State private var showingUnsavedChangesAlert = false
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private enum Importer: Identifiable {
     case video
@@ -37,57 +38,83 @@ struct EditorView: View {
         HSplitView {
           VStack(spacing: 0) {
             ZStack {
-              PreviewCanvas()
+              PreviewCanvas(playback: project.playback)
                 .padding(18)
                 .opacity(project.clips.isEmpty ? 0 : 1)
+                .scaleEffect(project.clips.isEmpty ? 0.985 : 1)
                 .allowsHitTesting(!project.clips.isEmpty)
                 .accessibilityHidden(project.clips.isEmpty)
               emptyState
                 .opacity(project.clips.isEmpty ? 1 : 0)
+                .scaleEffect(project.clips.isEmpty ? 1 : 0.985)
                 .allowsHitTesting(project.clips.isEmpty)
                 .accessibilityHidden(!project.clips.isEmpty)
             }
-            transportBar
+            EditorTransportBar(
+              project: project,
+              playback: project.playback
+            )
               .opacity(project.clips.isEmpty ? 0 : 1)
               .allowsHitTesting(!project.clips.isEmpty)
               .accessibilityHidden(project.clips.isEmpty)
             Divider()
               .opacity(project.clips.isEmpty ? 0 : 1)
             Divider()
-            TimelineView()
+            TimelineView(playback: project.playback)
               .frame(height: timelineHeight)
           }
           InspectorView()
         }
       }
       .frame(width: window.size.width, height: window.size.height)
+      .animation(
+        reduceMotion ? nil : EditorTheme.softAnimation,
+        value: project.clips.isEmpty
+      )
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .disabled(project.isBusy)
     .background(EditorTheme.canvas)
     .overlay {
       if project.isBusy {
-        VStack(spacing: 10) {
-          if let progress = project.exportProgress ?? project.transcriptionProgress {
-            ProgressView(value: progress)
-              .frame(width: 240)
-          } else {
-            ProgressView()
-          }
-          Text(project.status)
-          if exportTask != nil {
-            Button("Отменить экспорт") {
-              exportTask?.cancel()
+        ZStack {
+          Color.black.opacity(0.42)
+            .ignoresSafeArea()
+          VStack(spacing: 14) {
+            if let progress = project.exportProgress ?? project.transcriptionProgress {
+              ProgressView(value: progress)
+                .progressViewStyle(.linear)
+                .frame(width: 260)
+              Text("\(Int(min(1, max(0, progress)) * 100))%")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            } else {
+              ProgressView()
+                .controlSize(.large)
             }
-          } else if project.isTranscribing {
-            Button("Отменить создание субтитров") {
-              project.cancelTranscription()
+            Text(project.status)
+              .font(.headline)
+              .multilineTextAlignment(.center)
+            if exportTask != nil {
+              Button("Отменить экспорт") {
+                exportTask?.cancel()
+              }
+            } else if project.isTranscribing {
+              Button("Отменить создание субтитров") {
+                project.cancelTranscription()
+              }
             }
           }
+          .padding(24)
+          .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+          .overlay {
+            RoundedRectangle(cornerRadius: 16)
+              .stroke(.white.opacity(0.12), lineWidth: 1)
+          }
+          .shadow(color: .black.opacity(0.4), radius: 24, y: 10)
         }
-        .padding(20)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
         .environment(\.isEnabled, true)
+        .transition(.opacity)
       }
     }
     .alert(
@@ -210,7 +237,7 @@ struct EditorView: View {
   }
 
   private var timelineHeight: CGFloat {
-    222
+    (project.clips.isEmpty ? 222 : 252)
       + CGFloat(OverlayKind.timelineKinds(for: project.overlays).count) * 42
   }
 
@@ -258,6 +285,7 @@ struct EditorView: View {
       } label: {
         Image(systemName: "scissors")
       }
+      .buttonStyle(EditorIconButtonStyle())
       .disabled(!project.canSplitAtPlayhead)
       .help("Разрезать по позиции курсора (⌘B)")
       .accessibilityLabel("Разрезать по позиции курсора")
@@ -274,6 +302,7 @@ struct EditorView: View {
       } label: {
         Image(systemName: "trash")
       }
+      .buttonStyle(EditorIconButtonStyle())
       .disabled(project.selectedClipIDs.isEmpty)
       .help("Удалить выбранный фрагмент (⌫)")
       .accessibilityLabel("Удалить выбранный фрагмент")
@@ -314,6 +343,9 @@ struct EditorView: View {
     .padding(.horizontal, 14)
     .frame(height: 52)
     .background(EditorTheme.raised)
+    .overlay(alignment: .bottom) {
+      Rectangle().fill(EditorTheme.subtleSeparator).frame(height: 1)
+    }
   }
 
   private var emptyState: some View {
@@ -342,38 +374,6 @@ struct EditorView: View {
       }
     }
     .padding(32)
-  }
-
-  private var transportBar: some View {
-    HStack {
-      Text(project.status)
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
-      Spacer()
-      Text(project.playhead.timestamp)
-        .font(.caption.monospacedDigit())
-      Button {
-        project.togglePlayback()
-      } label: {
-        Image(
-          systemName: project.player.timeControlStatus == .playing
-            ? "pause.fill"
-            : "play.fill"
-        )
-        .frame(width: 24)
-      }
-      .buttonStyle(.borderless)
-      .keyboardShortcut(.space, modifiers: [])
-      Text(project.duration.timestamp)
-        .font(.caption.monospacedDigit())
-        .foregroundStyle(.secondary)
-      Spacer()
-      Color.clear.frame(width: 100, height: 1)
-    }
-    .padding(.horizontal, 16)
-    .frame(height: 38)
-    .background(Color(nsColor: .windowBackgroundColor).opacity(0.45))
   }
 
   private var allowedTypes: [UTType] {
@@ -421,12 +421,14 @@ struct EditorView: View {
   private func installTimeObserver() {
     guard timeObserver == nil else { return }
     timeObserver = project.player.addPeriodicTimeObserver(
-      forInterval: CMTime(seconds: 0.05, preferredTimescale: 600),
+      forInterval: CMTime(seconds: 1.0 / 30.0, preferredTimescale: 600),
       queue: .main
     ) { time in
       Task { @MainActor in
-        if project.player.timeControlStatus == .playing {
-          project.playhead = min(time.seconds, project.duration)
+        let isPlaying = project.player.timeControlStatus == .playing
+        project.playback.isPlaying = isPlaying
+        if isPlaying {
+          project.playback.playhead = min(time.seconds, project.duration)
         }
       }
     }
@@ -476,6 +478,18 @@ struct EditorView: View {
           ? 1 / project.timelineZoom
           : project.timelineNavigationStep
         project.seek(by: step)
+        return nil
+      case 126:
+        project.seekToPreviousEdit()
+        return nil
+      case 125:
+        project.seekToNextEdit()
+        return nil
+      case 115:
+        project.seek(to: 0)
+        return nil
+      case 119:
+        project.seek(to: project.duration)
         return nil
       case 51, 117:
         if project.selectedOverlayID != nil {
@@ -618,6 +632,82 @@ struct EditorView: View {
   private func safeProjectName(fallback: String) -> String {
     let trimmed = project.name.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? fallback : trimmed
+  }
+}
+
+private struct EditorTransportBar: View {
+  @ObservedObject var project: EditorProject
+  @ObservedObject var playback: PlaybackState
+
+  var body: some View {
+    HStack(spacing: 10) {
+      HStack(spacing: 7) {
+        Circle()
+          .fill(project.isBusy ? EditorTheme.selection : Color.green)
+          .frame(width: 6, height: 6)
+        Text(project.status)
+          .lineLimit(1)
+      }
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      .frame(maxWidth: 260, alignment: .leading)
+      Spacer()
+      Text(playback.playhead.timestamp)
+        .font(.caption.monospacedDigit())
+        .frame(minWidth: 62, alignment: .trailing)
+      Button {
+        project.seekToPreviousEdit()
+      } label: {
+        Image(systemName: "backward.end.fill")
+      }
+      .buttonStyle(EditorIconButtonStyle())
+      .help("К предыдущему стыку (↑)")
+      Button {
+        project.seek(by: -project.timelineNavigationStep)
+      } label: {
+        Image(systemName: "backward.frame.fill")
+      }
+      .buttonStyle(EditorIconButtonStyle())
+      .help("На один кадр назад (←)")
+      Button {
+        project.togglePlayback()
+      } label: {
+        Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+          .font(.system(size: 14, weight: .semibold))
+          .frame(width: 32, height: 26)
+          .background(EditorTheme.accent, in: Capsule())
+          .foregroundStyle(.white)
+      }
+      .buttonStyle(.plain)
+      .keyboardShortcut(.space, modifiers: [])
+      .help("Воспроизвести или поставить на паузу (Пробел)")
+      Button {
+        project.seek(by: project.timelineNavigationStep)
+      } label: {
+        Image(systemName: "forward.frame.fill")
+      }
+      .buttonStyle(EditorIconButtonStyle())
+      .help("На один кадр вперёд (→)")
+      Button {
+        project.seekToNextEdit()
+      } label: {
+        Image(systemName: "forward.end.fill")
+      }
+      .buttonStyle(EditorIconButtonStyle())
+      .help("К следующему стыку (↓)")
+      Text(project.duration.timestamp)
+        .font(.caption.monospacedDigit())
+        .foregroundStyle(.secondary)
+        .frame(minWidth: 62, alignment: .leading)
+      Spacer()
+      Color.clear.frame(width: 260, height: 1)
+    }
+    .padding(.horizontal, 16)
+    .frame(height: 38)
+    .background(EditorTheme.raised.opacity(0.76))
+    .overlay(alignment: .top) {
+      Rectangle().fill(EditorTheme.subtleSeparator).frame(height: 1)
+    }
   }
 }
 

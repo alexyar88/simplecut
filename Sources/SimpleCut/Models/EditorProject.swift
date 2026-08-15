@@ -19,7 +19,7 @@ final class EditorProject: ObservableObject {
   @Published private(set) var selectedClipIDs: Set<UUID> = []
   @Published var selectedOverlayID: UUID?
   @Published private(set) var inspectorFocusRequestID = UUID()
-  @Published var playhead: Double = 0
+  let playback = PlaybackState()
   @Published var timelineZoom = 1.0
   @Published var isBusy = false
   @Published var status = "Добавьте видео, чтобы начать"
@@ -29,6 +29,7 @@ final class EditorProject: ObservableObject {
   @Published var transcriptionProgress: Double?
   @Published var exportProgress: Double?
   @Published var isTranscribing = false
+  @Published private(set) var isAnalyzingColor = false
   @Published var audio = AudioSettings()
   @Published var color = ColorSettings()
   @Published private(set) var canUndo = false
@@ -44,7 +45,9 @@ final class EditorProject: ObservableObject {
   private let now: () -> Date
   private let namingTimeZone: TimeZone
   private var waveformGenerationID = UUID()
+  private var waveformClips: [VideoClip] = []
   private var playbackGenerationID = UUID()
+  private var colorAnalysisGenerationID = UUID()
   private var previewAudioURL: URL?
   private var resumePlaybackAfterAudioRebuild = false
   private struct HistorySnapshot {
@@ -61,6 +64,17 @@ final class EditorProject: ObservableObject {
   private let historyLimit = 100
   private var recoveryTask: Task<Void, Never>?
   private var transcriptionTask: Task<Void, Never>?
+  private var colorAnalysisTask: Task<Void, Never>?
+  private var waveformTask: Task<Void, Never>?
+  private var playbackRebuildTask: Task<Void, Never>?
+  private struct PendingSeek {
+    var time: CMTime
+    var toleranceBefore: CMTime
+    var toleranceAfter: CMTime
+  }
+  private var pendingSeek: PendingSeek?
+  private var isSeekInProgress = false
+  private var seekGeneration = 0
   private var isSynchronizingClipSelection = false
   private var securityScopedProjectURL: URL?
 
@@ -117,6 +131,11 @@ final class EditorProject: ObservableObject {
 
   var duration: Double {
     clips.reduce(0) { $0 + $1.duration }
+  }
+
+  var playhead: Double {
+    get { playback.playhead }
+    set { playback.playhead = newValue }
   }
 
   var displayName: String {
@@ -181,6 +200,8 @@ final class EditorProject: ObservableObject {
     waveformGenerationID = UUID()
     playbackGenerationID = UUID()
     player.pause()
+    playback.isPlaying = false
+    resetPendingSeeks()
     player.replaceCurrentItem(with: nil)
     discardPreviewAudio()
     name = Self.defaultName(for: now(), timeZone: namingTimeZone)
@@ -189,6 +210,7 @@ final class EditorProject: ObservableObject {
     clips = []
     overlays = []
     waveform = []
+    waveformClips = []
     selectedClipID = nil
     selectedOverlayID = nil
     playhead = 0
@@ -200,6 +222,10 @@ final class EditorProject: ObservableObject {
     isTranscribing = false
     transcriptionTask?.cancel()
     transcriptionTask = nil
+    colorAnalysisTask?.cancel()
+    colorAnalysisGenerationID = UUID()
+    colorAnalysisTask = nil
+    isAnalyzingColor = false
     audio = AudioSettings()
     color = ColorSettings()
     currentProjectURL = nil
@@ -266,6 +292,7 @@ final class EditorProject: ObservableObject {
         )
         recordUndoCheckpoint()
         clips.append(clip)
+        synchronizeWaveformPreview()
         selectedClipID = clip.id
         try await rebuildPlayback()
         status = "Видео импортировано"
@@ -286,17 +313,23 @@ final class EditorProject: ObservableObject {
   }
 
   private func generateWaveform() {
+    waveformTask?.cancel()
     let generationID = UUID()
     waveformGenerationID = generationID
     let currentClips = clips
-    Task {
+    waveformTask = Task {
+      try? await Task.sleep(for: .milliseconds(180))
+      guard !Task.isCancelled else { return }
       let samples =
         (try? await WaveformGenerator.samples(
           from: currentClips,
-          targetSampleCount: 1_200
+          targetSampleCount: 76_800
         )) ?? []
-      guard waveformGenerationID == generationID else { return }
+      guard !Task.isCancelled, waveformGenerationID == generationID else {
+        return
+      }
       waveform = samples
+      waveformClips = currentClips
       if status == "Видео импортировано" {
         status = "Готово"
       }
@@ -414,6 +447,7 @@ final class EditorProject: ObservableObject {
     let style =
       overlays.first(where: { $0.kind == .caption }).map(CaptionStyle.init)
       ?? CaptionStyleStore.activeStyle(in: captionStyleDefaults)
+        .adaptingBuiltInPosition(to: canvas)
     overlays.removeAll { $0.kind == .caption }
     let captions = drafts.compactMap { draft -> OverlayItem? in
       let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -856,8 +890,24 @@ final class EditorProject: ObservableObject {
   }
 
   func resizeClip(id: UUID, edge: TrimEdge, by requestedDelta: Double) {
+    guard let delta = clampedResizeDelta(
+      id: id,
+      edge: edge,
+      requestedDelta: requestedDelta
+    ), abs(delta) > 0.0001
+    else { return }
+    recordUndoCheckpoint()
+    applyClipResize(id: id, edge: edge, requestedDelta: requestedDelta)
+    rebuildAfterEdit()
+  }
+
+  private func clampedResizeDelta(
+    id: UUID,
+    edge: TrimEdge,
+    requestedDelta: Double
+  ) -> Double? {
     guard let index = clips.firstIndex(where: { $0.id == id }) else {
-      return
+      return nil
     }
     let clip = clips[index]
     let minimumDelta: Double
@@ -873,9 +923,21 @@ final class EditorProject: ObservableObject {
         (clip.sourceDuration ?? clip.sourceEnd) - clip.sourceEnd
       )
     }
-    let delta = min(max(requestedDelta, minimumDelta), maximumDelta)
-    guard abs(delta) > 0.0001 else { return }
-    recordUndoCheckpoint()
+    return min(max(requestedDelta, minimumDelta), maximumDelta)
+  }
+
+  private func applyClipResize(
+    id: UUID,
+    edge: TrimEdge,
+    requestedDelta: Double
+  ) {
+    guard let index = clips.firstIndex(where: { $0.id == id }),
+      let delta = clampedResizeDelta(
+        id: id,
+        edge: edge,
+        requestedDelta: requestedDelta
+      ), abs(delta) > 0.0001
+    else { return }
     let clipStart = clips.prefix(index).reduce(0) { $0 + $1.duration }
     switch edge {
     case .leading:
@@ -907,7 +969,6 @@ final class EditorProject: ObservableObject {
       }
     }
     setClipSelection([id], primary: id)
-    rebuildAfterEdit()
   }
 
   func selectClip(
@@ -1072,16 +1133,98 @@ final class EditorProject: ObservableObject {
   }
 
   func seek(to time: Double) {
+    seek(to: time, tolerance: .zero)
+  }
+
+  /// Seeks responsively while a pointer is moving. The final committed seek
+  /// still uses zero tolerance through `seek(to:)`.
+  func scrub(to time: Double) {
+    let frame = CMTime(value: 1, timescale: 30)
+    seek(to: time, tolerance: frame)
+  }
+
+  private func seek(to time: Double, tolerance: CMTime) {
     playhead = min(max(0, time), duration)
-    player.seek(
-      to: CMTime(seconds: playhead, preferredTimescale: 600),
-      toleranceBefore: .zero,
-      toleranceAfter: .zero
+    let previewTime = Self.previewTime(
+      for: playhead,
+      duration: duration
     )
+    requestPlayerSeek(
+      PendingSeek(
+        time: CMTime(seconds: previewTime, preferredTimescale: 600),
+        toleranceBefore: tolerance,
+        toleranceAfter: tolerance
+      )
+    )
+  }
+
+  private func requestPlayerSeek(_ seek: PendingSeek) {
+    guard player.currentItem != nil else { return }
+    pendingSeek = seek
+    performNextSeekIfNeeded()
+  }
+
+  private func performNextSeekIfNeeded() {
+    guard !isSeekInProgress, let seek = pendingSeek else { return }
+    pendingSeek = nil
+    isSeekInProgress = true
+    let generation = seekGeneration
+    player.seek(
+      to: seek.time,
+      toleranceBefore: seek.toleranceBefore,
+      toleranceAfter: seek.toleranceAfter
+    ) { [weak self] _ in
+      Task { @MainActor in
+        guard let self, self.seekGeneration == generation else { return }
+        self.isSeekInProgress = false
+        self.performNextSeekIfNeeded()
+      }
+    }
+  }
+
+  private func resetPendingSeeks() {
+    seekGeneration += 1
+    pendingSeek = nil
+    isSeekInProgress = false
+    player.currentItem?.cancelPendingSeeks()
+  }
+
+  nonisolated static func previewTime(
+    for playhead: Double,
+    duration: Double,
+    frameDuration: Double = 1.0 / 30.0
+  ) -> Double {
+    let clamped = min(max(0, playhead), max(0, duration))
+    guard duration > 0, clamped >= duration - 0.0001 else {
+      return clamped
+    }
+    return max(0, duration - frameDuration)
   }
 
   func seek(by offset: Double) {
     seek(to: playhead + offset)
+  }
+
+  func seekToPreviousEdit() {
+    let threshold = playhead - 0.001
+    let boundary = editBoundaries.last(where: { $0 < threshold }) ?? 0
+    seek(to: boundary)
+  }
+
+  func seekToNextEdit() {
+    let threshold = playhead + 0.001
+    let boundary = editBoundaries.first(where: { $0 > threshold }) ?? duration
+    seek(to: boundary)
+  }
+
+  private var editBoundaries: [Double] {
+    var elapsed = 0.0
+    var boundaries = [0.0]
+    for clip in clips {
+      elapsed += clip.duration
+      boundaries.append(elapsed)
+    }
+    return boundaries
   }
 
   var timelineNavigationStep: Double {
@@ -1091,9 +1234,11 @@ final class EditorProject: ObservableObject {
   func togglePlayback() {
     if player.timeControlStatus == .playing {
       player.pause()
+      playback.isPlaying = false
     } else {
       if playhead >= duration - 0.05 { seek(to: 0) }
       player.play()
+      playback.isPlaying = true
     }
   }
 
@@ -1122,6 +1267,7 @@ final class EditorProject: ObservableObject {
         clips: clips,
         canvas: canvas,
         scalingMode: scalingMode,
+        outputSize: canvas.previewSize,
         replacementAudioURL: processedAudio?.url
       )
       guard playbackGenerationID == generationID else {
@@ -1132,8 +1278,10 @@ final class EditorProject: ObservableObject {
       }
       let item = AVPlayerItem(asset: composition.asset)
       item.videoComposition = composition.videoComposition
+      item.audioMix = composition.audioMix
       let previousPreviewAudioURL = previewAudioURL
       previewAudioURL = processedAudio?.url
+      resetPendingSeeks()
       player.replaceCurrentItem(with: item)
       seek(to: min(playhead, duration))
       if let previousPreviewAudioURL,
@@ -1156,6 +1304,7 @@ final class EditorProject: ObservableObject {
       resumePlaybackAfterAudioRebuild
       || player.timeControlStatus == .playing
     player.pause()
+    playback.isPlaying = false
     recordUndoCheckpoint()
     audio = AudioSettings(normalizeLoudness: enabled)
     status = enabled
@@ -1166,6 +1315,7 @@ final class EditorProject: ObservableObject {
         guard try await rebuildPlayback() else { return }
         if resumePlaybackAfterAudioRebuild {
           player.play()
+          playback.isPlaying = true
         }
         resumePlaybackAfterAudioRebuild = false
         status = enabled
@@ -1175,6 +1325,36 @@ final class EditorProject: ObservableObject {
         resumePlaybackAfterAudioRebuild = false
         lastError = error.localizedDescription
         status = "Не удалось обновить звук предпросмотра"
+      }
+    }
+  }
+
+  func applyAutomaticColor() {
+    colorAnalysisTask?.cancel()
+    let generationID = UUID()
+    colorAnalysisGenerationID = generationID
+    let currentClips = clips
+    guard !currentClips.isEmpty else { return }
+    isAnalyzingColor = true
+    status = "Анализируем цвет видео…"
+    colorAnalysisTask = Task {
+      do {
+        let analyzed = try await AutoColorAnalyzer.analyze(clips: currentClips)
+        try Task.checkCancellation()
+        guard colorAnalysisGenerationID == generationID else { return }
+        recordUndoCheckpoint()
+        color = analyzed
+        isAnalyzingColor = false
+        status = "Автоцветокор применён"
+      } catch is CancellationError {
+        if colorAnalysisGenerationID == generationID {
+          isAnalyzingColor = false
+        }
+      } catch {
+        guard colorAnalysisGenerationID == generationID else { return }
+        isAnalyzingColor = false
+        lastError = error.localizedDescription
+        status = "Не удалось проанализировать цвет"
       }
     }
   }
@@ -1207,6 +1387,8 @@ final class EditorProject: ObservableObject {
       canvas = project.canvas
       scalingMode = project.scalingMode
       clips = project.clips
+      waveform = []
+      waveformClips = []
       overlays = Self.sanitizedOverlays(
         project.overlays,
         projectDuration: project.clips.reduce(0) { $0 + $1.duration }
@@ -1337,11 +1519,18 @@ final class EditorProject: ObservableObject {
   }
 
   private func rebuildAfterEdit() {
-    Task {
+    synchronizeWaveformPreview()
+    playbackRebuildTask?.cancel()
+    playbackRebuildTask = Task {
       do {
         await hydrateSourceDurations()
+        try Task.checkCancellation()
         try await rebuildPlayback()
+        try Task.checkCancellation()
         generateWaveform()
+        status = "Готово"
+      } catch is CancellationError {
+        return
       } catch {
         lastError = error.localizedDescription
         status = "Не удалось обновить монтаж"
@@ -1353,12 +1542,26 @@ final class EditorProject: ObservableObject {
     playbackGenerationID = UUID()
     waveformGenerationID = UUID()
     player.pause()
+    playback.isPlaying = false
+    resetPendingSeeks()
     player.replaceCurrentItem(with: nil)
     discardPreviewAudio()
     waveform = []
+    waveformClips = []
     playhead = 0
     timelineZoom = 1
     status = "Добавьте видео, чтобы начать"
+  }
+
+  private func synchronizeWaveformPreview() {
+    guard !waveform.isEmpty, !waveformClips.isEmpty else { return }
+    guard waveformClips != clips else { return }
+    waveform = WaveformPresentation.remapped(
+      waveform,
+      from: waveformClips,
+      to: clips
+    )
+    waveformClips = clips
   }
 
   private func hydrateSourceDurations() async {

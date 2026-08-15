@@ -14,6 +14,14 @@ for stale_root_bundle in "$application_directory"/*.bundle(N); do
 done
 cp "$binary_directory/SimpleCut" "$application_directory/Contents/MacOS/SimpleCut"
 cp "Resources/Info.plist" "$application_directory/Contents/Info.plist"
+xcrun actool \
+  --compile "$application_directory/Contents/Resources" \
+  --platform macosx \
+  --minimum-deployment-target 14.0 \
+  --app-icon AppIcon \
+  --output-partial-info-plist "$application_directory/Contents/asset-info.plist" \
+  "Resources/Assets.xcassets"
+rm "$application_directory/Contents/asset-info.plist"
 for resource_bundle in "$binary_directory"/*.bundle(N); do
   bundle_name="${resource_bundle:t}"
   rm -rf "$application_directory/Contents/Resources/$bundle_name"

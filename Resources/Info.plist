@@ -4,9 +4,13 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>ru</string>
-    <key>CFBundleExecutable</key>
-    <string>SimpleCut</string>
-    <key>CFBundleIdentifier</key>
+	<key>CFBundleExecutable</key>
+	<string>SimpleCut</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
     <string>app.simplecut.editor</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>

@@ -1,15 +1,38 @@
 import AppKit
 
+private final class CaptionRenderCacheEntry {
+  let result: CaptionRenderResult
+
+  init(_ result: CaptionRenderResult) {
+    self.result = result
+  }
+}
+
+private final class CaptionRenderCache: @unchecked Sendable {
+  let storage: NSCache<NSString, CaptionRenderCacheEntry> = {
+    let cache = NSCache<NSString, CaptionRenderCacheEntry>()
+    cache.countLimit = 256
+    cache.totalCostLimit = 192 * 1_024 * 1_024
+    return cache
+  }()
+}
+
 struct CaptionRenderResult {
   let image: CGImage
   let size: CGSize
 }
 
 enum CaptionRenderer {
+  private static let cache = CaptionRenderCache()
+
   static func render(
     item: OverlayItem,
     canvasSize: CGSize
   ) -> CaptionRenderResult? {
+    let cacheKey = renderCacheKey(item: item, canvasSize: canvasSize)
+    if let cached = cache.storage.object(forKey: cacheKey) {
+      return cached.result
+    }
     let scale = canvasSize.width / 1_080
     let fontSize = max(1, item.fontSize * scale)
     let baseFont =
@@ -100,10 +123,40 @@ enum CaptionRenderer {
     NSGraphicsContext.restoreGraphicsState()
 
     guard let image = representation.cgImage else { return nil }
-    return CaptionRenderResult(
+    let result = CaptionRenderResult(
       image: image,
       size: CGSize(width: width, height: height)
     )
+    cache.storage.setObject(
+      CaptionRenderCacheEntry(result),
+      forKey: cacheKey,
+      cost: pixelsWide * pixelsHigh * 4
+    )
+    return result
+  }
+
+  private static func renderCacheKey(
+    item: OverlayItem,
+    canvasSize: CGSize
+  ) -> NSString {
+    let components: [String] = [
+      item.id.uuidString,
+      item.text ?? "",
+      item.fontName,
+      item.fontWeight.rawValue,
+      item.textAlignment.rawValue,
+      item.foregroundHex,
+      item.backgroundHex,
+      item.strokeHex,
+      String(item.fontSize),
+      String(item.normalizedWidth),
+      String(item.strokeWidth),
+      String(item.textPadding),
+      String(item.cornerRadius),
+      String(Double(canvasSize.width)),
+      String(Double(canvasSize.height)),
+    ]
+    return components.joined(separator: "|") as NSString
   }
 }
 

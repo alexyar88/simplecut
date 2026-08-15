@@ -4,24 +4,24 @@ import SwiftUI
 struct PlayerView: NSViewRepresentable {
   let player: AVPlayer
   let scalingMode: VideoScalingMode
+  let color: ColorSettings
 
   func makeNSView(context: Context) -> PlayerContainerView {
     let view = PlayerContainerView()
-    view.playerLayer.player = player
-    view.playerLayer.videoGravity =
-      scalingMode == .fill ? .resizeAspectFill : .resizeAspect
+    view.update(player: player, scalingMode: scalingMode, color: color)
     return view
   }
 
   func updateNSView(_ nsView: PlayerContainerView, context: Context) {
-    nsView.playerLayer.player = player
-    nsView.playerLayer.videoGravity =
-      scalingMode == .fill ? .resizeAspectFill : .resizeAspect
+    nsView.update(player: player, scalingMode: scalingMode, color: color)
   }
 }
 
 final class PlayerContainerView: NSView {
   let playerLayer = AVPlayerLayer()
+  private weak var configuredPlayer: AVPlayer?
+  private var configuredScalingMode: VideoScalingMode?
+  private var configuredColor: ColorSettings?
 
   override init(frame frameRect: NSRect) {
     super.init(frame: frameRect)
@@ -39,5 +39,25 @@ final class PlayerContainerView: NSView {
   override func layout() {
     super.layout()
     playerLayer.frame = bounds
+  }
+
+  func update(
+    player: AVPlayer,
+    scalingMode: VideoScalingMode,
+    color: ColorSettings
+  ) {
+    if configuredPlayer !== player {
+      configuredPlayer = player
+      playerLayer.player = player
+    }
+    if configuredScalingMode != scalingMode {
+      configuredScalingMode = scalingMode
+      playerLayer.videoGravity =
+        scalingMode == .fill ? .resizeAspectFill : .resizeAspect
+    }
+    if configuredColor != color {
+      configuredColor = color
+      playerLayer.filters = ColorPipeline.filters(for: color)
+    }
   }
 }

@@ -3,6 +3,9 @@ import SwiftUI
 
 struct PreviewCanvas: View {
   @EnvironmentObject private var project: EditorProject
+  @ObservedObject var playback: PlaybackState
+  @AppStorage("SimpleCut.preview.socialSafeArea")
+  private var showsSocialSafeArea = true
   @State private var draggingOverlayID: UUID?
   @State private var resizingOverlayID: UUID?
   @State private var resizeStartWidth: Double?
@@ -13,21 +16,23 @@ struct PreviewCanvas: View {
       let canvasSize = fittedCanvasSize(in: proxy.size)
       ZStack {
         Color.black
-        PlayerView(player: project.player, scalingMode: project.scalingMode)
-          .brightness(project.color.brightness)
-          .contrast(project.color.contrast)
-          .saturation(project.color.saturation)
-          .colorMultiply(
-            Color(
-              red: 1,
-              green: 1 - max(0, project.color.warmth) * 0.06,
-              blue: 1 - max(0, project.color.warmth) * 0.12
-            )
-          )
+        PlayerView(
+          player: project.player,
+          scalingMode: project.scalingMode,
+          color: project.color
+        )
+
+        if showsSocialSafeArea,
+          let safeArea = project.canvas.socialSafeArea
+        {
+          socialSafeAreaOverlay(safeArea, canvasSize: canvasSize)
+        }
+
+        alignmentGuides(in: canvasSize)
 
         ForEach(project.overlays.inCompositingOrder) { item in
-          if project.playhead >= item.startTime,
-            project.playhead <= item.startTime + item.duration
+          if playback.playhead >= item.startTime,
+            playback.playhead <= item.startTime + item.duration
           {
             overlay(item, in: canvasSize)
           }
@@ -36,8 +41,8 @@ struct PreviewCanvas: View {
         if let selectedOverlay = project.overlays.first(where: {
           $0.id == project.selectedOverlayID
         }),
-          project.playhead >= selectedOverlay.startTime,
-          project.playhead
+          playback.playhead >= selectedOverlay.startTime,
+          playback.playhead
             <= selectedOverlay.startTime + selectedOverlay.duration
         {
           selectedOverlayInteraction(selectedOverlay, in: canvasSize)
@@ -47,6 +52,72 @@ struct PreviewCanvas: View {
       .coordinateSpace(name: "previewCanvas")
       .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
       .clipped()
+      .overlay {
+        Rectangle()
+          .stroke(.white.opacity(0.1), lineWidth: 1)
+      }
+      .shadow(color: .black.opacity(0.5), radius: 22, y: 8)
+      .overlay(alignment: .topTrailing) {
+        if project.canvas == .vertical {
+          Button {
+            showsSocialSafeArea.toggle()
+          } label: {
+            Image(
+              systemName: showsSocialSafeArea
+                ? "rectangle.dashed.badge.record"
+                : "rectangle.dashed"
+            )
+          }
+          .buttonStyle(.borderless)
+          .padding(8)
+          .help(
+            showsSocialSafeArea
+              ? "Скрыть безопасную зону соцсетей"
+              : "Показать безопасную зону соцсетей"
+          )
+        }
+      }
+    }
+  }
+
+  private func socialSafeAreaOverlay(
+    _ normalizedRect: CGRect,
+    canvasSize: CGSize
+  ) -> some View {
+    let rect = CGRect(
+      x: normalizedRect.minX * canvasSize.width,
+      y: normalizedRect.minY * canvasSize.height,
+      width: normalizedRect.width * canvasSize.width,
+      height: normalizedRect.height * canvasSize.height
+    )
+    return RoundedRectangle(cornerRadius: 6)
+      .stroke(
+        Color.white.opacity(0.55),
+        style: StrokeStyle(lineWidth: 1, dash: [5, 4])
+      )
+      .frame(width: rect.width, height: rect.height)
+      .position(x: rect.midX, y: rect.midY)
+      .allowsHitTesting(false)
+      .accessibilityHidden(true)
+  }
+
+  @ViewBuilder
+  private func alignmentGuides(in size: CGSize) -> some View {
+    if let draggingOverlayID,
+      let item = project.overlays.first(where: { $0.id == draggingOverlayID })
+    {
+      if abs(item.normalizedX - 0.5) < 0.0001 {
+        Rectangle()
+          .fill(EditorTheme.selection.opacity(0.85))
+          .frame(width: 1, height: size.height)
+          .allowsHitTesting(false)
+      }
+      if abs(item.normalizedY - 0.5) < 0.0001 {
+        Rectangle()
+          .fill(EditorTheme.selection.opacity(0.85))
+          .frame(width: size.width, height: 1)
+          .allowsHitTesting(false)
+      }
     }
   }
 
@@ -62,6 +133,14 @@ struct PreviewCanvas: View {
         project.selectOverlay(id: item.id)
       }
       .gesture(overlayDragGesture(for: item, canvasSize: size))
+      .onContinuousHover { phase in
+        switch phase {
+        case .active:
+          NSCursor.openHand.set()
+        case .ended:
+          NSCursor.arrow.set()
+        }
+      }
       .position(
         x: size.width * item.normalizedX,
         y: size.height * item.normalizedY
@@ -89,7 +168,7 @@ struct PreviewCanvas: View {
       }
     case .image:
       if let url = item.imageURL,
-        let image = NSImage(contentsOf: url)
+        let image = PreviewAssetCache.image(at: url)
       {
         Image(nsImage: image)
           .resizable()
@@ -169,16 +248,22 @@ struct PreviewCanvas: View {
         if draggingOverlayID != item.id {
           project.recordUndoCheckpoint()
           draggingOverlayID = item.id
+          NSCursor.closedHand.set()
         }
         project.selectedOverlayID = item.id
-        let normalizedX = min(
+        let requestedX = min(
           1,
           max(0, value.location.x / max(size.width, 1))
         )
-        let normalizedY = min(
+        let requestedY = min(
           1,
           max(0, value.location.y / max(size.height, 1))
         )
+        let snapDistance = 8 / max(min(size.width, size.height), 1)
+        let normalizedX = abs(requestedX - 0.5) <= snapDistance
+          ? 0.5 : requestedX
+        let normalizedY = abs(requestedY - 0.5) <= snapDistance
+          ? 0.5 : requestedY
         if item.kind == .caption {
           project.setCaptionPosition(
             normalizedX: normalizedX,
@@ -191,6 +276,7 @@ struct PreviewCanvas: View {
       }
       .onEnded { _ in
         draggingOverlayID = nil
+        NSCursor.openHand.set()
       }
   }
 

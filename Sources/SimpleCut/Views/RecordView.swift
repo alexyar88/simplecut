@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import AVKit
 import SwiftUI
 
 struct RecordView: View {
@@ -7,11 +8,14 @@ struct RecordView: View {
   @EnvironmentObject private var project: EditorProject
   @StateObject private var recorder = RecordingService()
   @State private var isFinalizing = false
+  @State private var pendingRecordingURL: URL?
+  @State private var reviewPlayer: AVPlayer?
   @State private var showGrid = true
   @State private var teleprompterStartedAt: Date?
   @State private var devicesExpanded = false
   @State private var recordingExpanded = false
   @State private var teleprompterAppearanceExpanded = false
+  @State private var textEditingKeyMonitor: Any?
   @AppStorage("recording.countdownSeconds.v2") private var countdownSeconds = 0
   @AppStorage("teleprompter.enabled") private var teleprompterEnabled = false
   @AppStorage("teleprompter.text") private var teleprompterText = ""
@@ -21,19 +25,24 @@ struct RecordView: View {
   private var teleprompterBackgroundOpacity = 0.42
 
   var body: some View {
-    VStack(spacing: 16) {
-      statusBar
-      HStack(alignment: .top, spacing: 20) {
-        previewColumn
-        settingsPanel
+    GeometryReader { geometry in
+      Group {
+        if let pendingRecordingURL {
+          recordingReview(url: pendingRecordingURL)
+        } else {
+          recordingWorkspace(availableSize: geometry.size)
+        }
       }
     }
-    .padding(20)
-    .frame(minWidth: 980, minHeight: 680)
+    .padding(16)
+    .frame(minWidth: 620, minHeight: 560)
     .background(Color(nsColor: .windowBackgroundColor))
     .task {
       await recorder.startPreview()
       devicesExpanded = recorder.cameras.isEmpty || recorder.microphones.isEmpty
+    }
+    .onAppear {
+      installTextEditingKeyMonitor()
     }
     .onChange(of: recorder.selectedCameraID) {
       recorder.reconfigure()
@@ -60,6 +69,11 @@ struct RecordView: View {
       updateTeleprompterStart()
     }
     .onDisappear {
+      reviewPlayer?.pause()
+      if let textEditingKeyMonitor {
+        NSEvent.removeMonitor(textEditingKeyMonitor)
+        self.textEditingKeyMonitor = nil
+      }
       if recorder.isRecording {
         recorder.stopRecording()
       } else if recorder.isStartingRecording {
@@ -82,33 +96,54 @@ struct RecordView: View {
   }
 
   private var statusBar: some View {
-    HStack(spacing: 14) {
+    HStack(spacing: 9) {
       Circle()
         .fill(statusColor)
         .frame(width: 9, height: 9)
         .shadow(color: statusColor.opacity(0.55), radius: 4)
-      VStack(alignment: .leading, spacing: 1) {
-        Text(statusTitle)
-          .font(.headline)
-        Text(statusDetail)
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      }
-      Spacer()
+      Text(statusTitle)
+        .font(.headline)
+      Text(statusDetail)
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
-    .frame(minHeight: 34)
+    .frame(maxWidth: .infinity, minHeight: 26)
     .accessibilityElement(children: .combine)
   }
 
-  private var previewColumn: some View {
-    VStack(spacing: 10) {
-      preview
-      frameControls
+  private func recordingWorkspace(availableSize: CGSize) -> some View {
+    let contentWidth = max(0, availableSize.width)
+    let previewSize = preferredPreviewSize(availableWidth: contentWidth)
+
+    return VStack(spacing: 0) {
+      ScrollView(.vertical) {
+        VStack(spacing: 10) {
+          statusBar
+          previewColumn(size: previewSize)
+          settingsBelowPreview(availableWidth: contentWidth)
+        }
+        .frame(maxWidth: .infinity, alignment: .top)
+        .padding(.bottom, 12)
+      }
+      .scrollBounceBehavior(.basedOnSize)
+
+      Divider()
+      recordAction
+        .frame(maxWidth: 760)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 12)
     }
-    .frame(maxWidth: 560)
   }
 
-  private var preview: some View {
+  private func previewColumn(size: CGSize) -> some View {
+    VStack(spacing: 10) {
+      preview(size: size)
+      frameControls
+    }
+    .frame(width: size.width)
+  }
+
+  private func preview(size: CGSize) -> some View {
     ZStack {
       CameraPreview(
         session: recorder.session,
@@ -159,14 +194,25 @@ struct RecordView: View {
           .transition(.scale.combined(with: .opacity))
           .accessibilityLabel("Запись начнётся через \(countdown)")
       }
+
+      if recorder.isRecording {
+        VStack {
+          Spacer()
+          HStack {
+            Spacer()
+            recordingBadge
+          }
+        }
+        .padding(12)
+        .allowsHitTesting(false)
+      }
     }
     .clipShape(RoundedRectangle(cornerRadius: 14))
     .overlay {
       RoundedRectangle(cornerRadius: 14)
         .stroke(.white.opacity(0.1))
     }
-    .aspectRatio(project.canvas.aspectRatio, contentMode: .fit)
-    .frame(maxWidth: 560, maxHeight: 560)
+    .frame(width: size.width, height: size.height, alignment: .top)
     .animation(.snappy, value: recorder.countdown)
   }
 
@@ -177,44 +223,30 @@ struct RecordView: View {
       wordsPerMinute: teleprompterSpeed,
       backgroundOpacity: teleprompterBackgroundOpacity,
       isRunning: recorder.isRecording,
-      startedAt: teleprompterStartedAt
+      startedAt: teleprompterStartedAt,
+      canvas: project.canvas
     )
     .accessibilityHidden(true)
   }
 
   private var frameControls: some View {
-    HStack(spacing: 8) {
-      Picker("Масштаб кадра", selection: $recorder.previewMode) {
-        ForEach(CapturePreviewMode.allCases) { mode in
-          Text(mode.title).tag(mode)
+    ViewThatFits(in: .horizontal) {
+      HStack(spacing: 8) {
+        previewModePicker
+        rotateButton
+        mirrorButton
+        gridToggle
+      }
+
+      VStack(spacing: 8) {
+        previewModePicker
+        HStack(spacing: 8) {
+          rotateButton
+          mirrorButton
+          Spacer(minLength: 0)
+          gridToggle
         }
       }
-      .pickerStyle(.segmented)
-      .labelsHidden()
-      .frame(maxWidth: 190)
-
-      Button {
-        recorder.rotateClockwise()
-      } label: {
-        Image(systemName: "rotate.right")
-          .frame(width: 18)
-      }
-      .accessibilityLabel("Повернуть на 90 градусов")
-      .help("Повернуть на 90°")
-
-      Button {
-        recorder.toggleMirroring()
-      } label: {
-        Image(systemName: "arrowtriangle.left.and.line.vertical.and.arrowtriangle.right")
-          .frame(width: 18)
-      }
-      .tint(recorder.isMirrored ? .accentColor : nil)
-      .accessibilityLabel("Отразить по горизонтали")
-      .help("Отразить по горизонтали")
-
-      Toggle("Сетка", isOn: $showGrid)
-        .toggleStyle(.switch)
-        .controlSize(.small)
     }
     .buttonStyle(.bordered)
     .padding(.horizontal, 10)
@@ -224,22 +256,66 @@ struct RecordView: View {
     .disabled(configurationLocked)
   }
 
-  private var settingsPanel: some View {
-    VStack(spacing: 10) {
-      ScrollView {
-        VStack(alignment: .leading, spacing: 10) {
-          devicesCard
-          recordingCard
-          teleprompterCard
-        }
-        .padding(.trailing, 4)
+  private var previewModePicker: some View {
+    Picker("Масштаб кадра", selection: $recorder.previewMode) {
+      ForEach(CapturePreviewMode.allCases) { mode in
+        Text(mode.title).tag(mode)
       }
-      .scrollIndicators(.visible)
-
-      Divider()
-      recordAction
     }
-    .frame(width: 420)
+    .pickerStyle(.segmented)
+    .labelsHidden()
+    .frame(maxWidth: 190)
+  }
+
+  private var rotateButton: some View {
+    Button {
+      recorder.rotateClockwise()
+    } label: {
+      Image(systemName: "rotate.right")
+        .frame(width: 18)
+    }
+    .accessibilityLabel("Повернуть на 90 градусов")
+    .help("Повернуть на 90°")
+  }
+
+  private var mirrorButton: some View {
+    Button {
+      recorder.toggleMirroring()
+    } label: {
+      Image(systemName: "arrowtriangle.left.and.line.vertical.and.arrowtriangle.right")
+        .frame(width: 18)
+    }
+    .tint(recorder.isMirrored ? .accentColor : nil)
+    .accessibilityLabel("Отразить по горизонтали")
+    .help("Отразить по горизонтали")
+  }
+
+  private var gridToggle: some View {
+    Toggle("Сетка", isOn: $showGrid)
+      .toggleStyle(.switch)
+      .controlSize(.small)
+  }
+
+  @ViewBuilder
+  private func settingsBelowPreview(availableWidth: CGFloat) -> some View {
+    if availableWidth >= 860 {
+      HStack(alignment: .top, spacing: 10) {
+        devicesCard
+          .frame(maxWidth: .infinity)
+        recordingCard
+          .frame(maxWidth: .infinity)
+        teleprompterCard
+          .frame(maxWidth: .infinity)
+      }
+      .frame(maxWidth: 940)
+    } else {
+      VStack(alignment: .leading, spacing: 10) {
+        devicesCard
+        recordingCard
+        teleprompterCard
+      }
+      .frame(maxWidth: 720)
+    }
   }
 
   private var devicesCard: some View {
@@ -434,9 +510,9 @@ struct RecordView: View {
       .buttonStyle(.borderedProminent)
       .controlSize(.large)
       .tint(
-        recorder.isRecording
-          ? .red
-          : .accentColor
+        recorder.countdown != nil
+          ? Color.secondary
+          : Color.red
       )
       .keyboardShortcut("r", modifiers: .command)
       .disabled(recorder.cameras.isEmpty || isFinalizing)
@@ -450,7 +526,7 @@ struct RecordView: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(EditorTheme.raised, in: RoundedRectangle(cornerRadius: 4))
-          Text("После остановки клип появится в конце таймлайна.")
+          Text("После остановки можно проверить дубль.")
         }
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -458,6 +534,82 @@ struct RecordView: View {
     }
     .padding(.top, 2)
     .background(Color(nsColor: .windowBackgroundColor))
+  }
+
+  private var recordingBadge: some View {
+    HStack(spacing: 7) {
+      Circle()
+        .fill(.red)
+        .frame(width: 9, height: 9)
+      Text("REC")
+        .fontWeight(.bold)
+      Text(recorder.recordingDuration.timestamp)
+        .monospacedDigit()
+    }
+    .font(.caption)
+    .foregroundStyle(.white)
+    .padding(.horizontal, 10)
+    .padding(.vertical, 7)
+    .background(.black.opacity(0.68), in: Capsule())
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel("Идёт запись, \(recorder.recordingDuration.timestamp)")
+  }
+
+  private func recordingReview(url: URL) -> some View {
+    VStack(spacing: 18) {
+      VStack(spacing: 4) {
+        Text("Проверьте запись")
+          .font(.title2.bold())
+        Text("Добавьте удачный дубль на таймлайн или запишите заново.")
+          .foregroundStyle(.secondary)
+      }
+
+      RecordingReviewPlayer(player: reviewPlayer)
+        .background(.black)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay {
+          RoundedRectangle(cornerRadius: 14)
+            .stroke(.white.opacity(0.1))
+        }
+        .aspectRatio(project.canvas.aspectRatio, contentMode: .fit)
+        .frame(maxWidth: 720, maxHeight: 400)
+
+      HStack(spacing: 12) {
+        Button(action: retakeRecording) {
+          Label("Перезаписать", systemImage: "arrow.counterclockwise")
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .disabled(isFinalizing)
+
+        Button {
+          addRecordingToTimeline(url)
+        } label: {
+          Label("Добавить на таймлайн", systemImage: "plus.rectangle.on.rectangle")
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(isFinalizing)
+      }
+      .frame(maxWidth: 720)
+
+      if isFinalizing {
+        ProgressView("Добавляем запись…")
+      } else {
+        Text(url.lastPathComponent)
+          .font(.caption)
+          .foregroundStyle(.tertiary)
+          .lineLimit(1)
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .onAppear {
+      if reviewPlayer == nil {
+        reviewPlayer = AVPlayer(url: url)
+      }
+    }
   }
 
   private func settingsCard<Content: View>(
@@ -573,18 +725,39 @@ struct RecordView: View {
       recorder.cancelCountdown()
     } else {
       recorder.startRecording(countdown: countdownSeconds) { url in
-        isFinalizing = true
-        project.importVideo(url, copyToLibrary: false) { success in
-          if success {
-            Task {
-              await recorder.stopPreviewAndWait()
-              isFinalizing = false
-              dismiss()
-            }
-          } else {
-            isFinalizing = false
-          }
+        pendingRecordingURL = url
+        reviewPlayer = AVPlayer(url: url)
+        reviewPlayer?.play()
+      }
+    }
+  }
+
+  private func retakeRecording() {
+    guard let pendingRecordingURL else { return }
+    reviewPlayer?.pause()
+    reviewPlayer = nil
+    do {
+      try FileManager.default.removeItem(at: pendingRecordingURL)
+      self.pendingRecordingURL = nil
+    } catch {
+      recorder.errorMessage = "Не удалось удалить дубль: \(error.localizedDescription)"
+    }
+  }
+
+  private func addRecordingToTimeline(_ url: URL) {
+    reviewPlayer?.pause()
+    isFinalizing = true
+    project.importVideo(url, copyToLibrary: false) { success in
+      if success {
+        Task {
+          await recorder.stopPreviewAndWait()
+          isFinalizing = false
+          pendingRecordingURL = nil
+          reviewPlayer = nil
+          dismiss()
         }
+      } else {
+        isFinalizing = false
       }
     }
   }
@@ -607,6 +780,32 @@ struct RecordView: View {
     panel.allowsMultipleSelection = false
     if panel.runModal() == .OK {
       recorder.outputDirectory = panel.url
+    }
+  }
+
+  private func installTextEditingKeyMonitor() {
+    guard textEditingKeyMonitor == nil else { return }
+    textEditingKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+      guard
+        event.window?.title == "Запись",
+        let textView = event.window?.firstResponder as? NSTextView,
+        !event.modifierFlags.intersection([.command, .control]).isEmpty,
+        event.modifierFlags.intersection([.option, .shift]).isEmpty
+      else {
+        return event
+      }
+
+      switch event.keyCode {
+      case 0: // A
+        textView.selectAll(nil)
+      case 8: // C
+        textView.copy(nil)
+      case 9: // V
+        textView.paste(nil)
+      default:
+        return event
+      }
+      return nil
     }
   }
 
@@ -644,6 +843,25 @@ struct RecordView: View {
     if recorder.countdown != nil { return .orange }
     if recorder.cameras.isEmpty || recorder.microphones.isEmpty { return .orange }
     return .green
+  }
+
+  private func preferredPreviewSize(availableWidth: CGFloat) -> CGSize {
+    let maximumWidth: CGFloat
+    let maximumHeight: CGFloat
+    switch project.canvas {
+    case .horizontal:
+      maximumWidth = 760
+      maximumHeight = 430
+    case .vertical:
+      maximumWidth = 360
+      maximumHeight = 440
+    case .square:
+      maximumWidth = 520
+      maximumHeight = 480
+    }
+
+    let width = min(maximumWidth, availableWidth, maximumHeight * project.canvas.aspectRatio)
+    return CGSize(width: width, height: width / project.canvas.aspectRatio)
   }
 
   private var storageEstimate: String {
@@ -694,7 +912,33 @@ struct RecordView: View {
   private var recordButtonSystemImage: String {
     if recorder.isRecording || recorder.isStartingRecording { return "stop.fill" }
     if recorder.countdown != nil { return "xmark" }
-    return "record.circle"
+    return "record.circle.fill"
+  }
+}
+
+private struct RecordingReviewPlayer: NSViewRepresentable {
+  let player: AVPlayer?
+
+  func makeNSView(context: Context) -> AVPlayerView {
+    let view = AVPlayerView()
+    view.controlsStyle = .inline
+    view.videoGravity = .resizeAspect
+    view.showsFullScreenToggleButton = false
+    view.showsSharingServiceButton = false
+    view.showsFrameSteppingButtons = false
+    view.player = player
+    return view
+  }
+
+  func updateNSView(_ view: AVPlayerView, context: Context) {
+    if view.player !== player {
+      view.player = player
+    }
+  }
+
+  static func dismantleNSView(_ view: AVPlayerView, coordinator: Void) {
+    view.player?.pause()
+    view.player = nil
   }
 }
 
@@ -723,6 +967,7 @@ private struct TeleprompterOverlay: View {
   let backgroundOpacity: Double
   let isRunning: Bool
   let startedAt: Date?
+  let canvas: CanvasPreset
 
   var body: some View {
     VStack {
@@ -752,7 +997,7 @@ private struct TeleprompterOverlay: View {
       }
       .frame(
         maxWidth: .infinity,
-        maxHeight: 225,
+        maxHeight: maximumHeight,
         alignment: .top
       )
       .background(
@@ -767,6 +1012,17 @@ private struct TeleprompterOverlay: View {
         )
       )
       Spacer()
+    }
+  }
+
+  private var maximumHeight: CGFloat {
+    switch canvas {
+    case .vertical:
+      360
+    case .horizontal:
+      225
+    case .square:
+      280
     }
   }
 }

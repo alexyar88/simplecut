@@ -6,6 +6,10 @@ struct InspectorView: View {
   @State private var styleNameDraft = ""
   @State private var currentCaptionStyleName: String?
   @State private var currentTextStyleName: String?
+  @State private var hasProjectNameCheckpoint = false
+  @State private var textEditingCheckpointIDs: Set<UUID> = []
+  @FocusState private var isProjectNameFocused: Bool
+  @FocusState private var focusedTextOverlayID: UUID?
 
   var body: some View {
     ScrollViewReader { proxy in
@@ -17,11 +21,20 @@ struct InspectorView: View {
               get: { project.name },
               set: {
                 guard $0 != project.name else { return }
-                project.recordUndoCheckpoint()
+                if !hasProjectNameCheckpoint {
+                  project.recordUndoCheckpoint()
+                  hasProjectNameCheckpoint = true
+                }
                 project.name = $0
               }
             )
           )
+          .focused($isProjectNameFocused)
+          .onChange(of: isProjectNameFocused) {
+            if !isProjectNameFocused {
+              hasProjectNameCheckpoint = false
+            }
+          }
           Picker(
             "Формат",
             selection: Binding(
@@ -110,8 +123,12 @@ struct InspectorView: View {
             )
             HStack {
               Button("Авто") {
-                project.recordUndoCheckpoint()
-                project.color = .automatic
+                project.applyAutomaticColor()
+              }
+              .disabled(project.isAnalyzingColor)
+              if project.isAnalyzingColor {
+                ProgressView()
+                  .controlSize(.small)
               }
               Button("Сбросить") {
                 project.recordUndoCheckpoint()
@@ -184,6 +201,7 @@ struct InspectorView: View {
         }
       }
       .formStyle(.grouped)
+      .contentMargins(12)
       .scrollContentBackground(.hidden)
       .background(EditorTheme.panel)
       .onChange(of: project.selectedOverlayID) {
@@ -191,6 +209,9 @@ struct InspectorView: View {
       }
       .onChange(of: project.inspectorFocusRequestID) {
         scrollToSelectedOverlay(using: proxy)
+      }
+      .onChange(of: focusedTextOverlayID) {
+        textEditingCheckpointIDs.removeAll()
       }
     }
     .frame(minWidth: 250, idealWidth: 280, maxWidth: 320)
@@ -372,13 +393,14 @@ struct InspectorView: View {
               }),
               project.overlays[currentIndex].text != newValue
             else { return }
-            project.recordUndoCheckpoint()
+            recordTextEditingCheckpointIfNeeded(for: item.id)
             project.overlays[currentIndex].text = newValue
           }
         ),
         axis: .vertical
       )
       .textFieldStyle(.plain)
+      .focused($focusedTextOverlayID, equals: item.id)
       .labelsHidden()
       .lineLimit(1...2)
       .simultaneousGesture(
@@ -423,7 +445,10 @@ struct InspectorView: View {
     if item.kind == .text {
       Section("Текст") {
         textEditor(index: index)
-        Picker("Шрифт", selection: $project.overlays[index].fontName) {
+        Picker(
+          "Шрифт",
+          selection: overlayBinding(index: index, keyPath: \.fontName)
+        ) {
           ForEach(fontFamilies, id: \.self) { family in
             Text(family).tag(family)
           }
@@ -431,7 +456,7 @@ struct InspectorView: View {
         .pickerStyle(.menu)
         Picker(
           "Начертание",
-          selection: $project.overlays[index].fontWeight
+          selection: overlayBinding(index: index, keyPath: \.fontWeight)
         ) {
           ForEach(CaptionFontWeight.allCases) { weight in
             Text(weight.title).tag(weight)
@@ -439,7 +464,7 @@ struct InspectorView: View {
         }
         .pickerStyle(.menu)
         alignmentPicker(
-          selection: $project.overlays[index].textAlignment
+          selection: overlayBinding(index: index, keyPath: \.textAlignment)
         )
         inspectorSlider(
           "Размер шрифта",
@@ -505,11 +530,12 @@ struct InspectorView: View {
   }
 
   private func textEditor(index: Int) -> some View {
+    let itemID = project.overlays[index].id
     let text = Binding(
       get: { project.overlays[index].text ?? "" },
       set: { newValue in
         guard newValue != project.overlays[index].text else { return }
-        project.recordUndoCheckpoint()
+        recordTextEditingCheckpointIfNeeded(for: itemID)
         project.overlays[index].text = newValue
       }
     )
@@ -522,6 +548,7 @@ struct InspectorView: View {
           .allowsHitTesting(false)
       }
       TextEditor(text: text)
+        .focused($focusedTextOverlayID, equals: itemID)
         .font(.body)
         .scrollContentBackground(.hidden)
         .padding(4)
@@ -694,6 +721,29 @@ struct InspectorView: View {
         project.recordUndoCheckpoint()
       }
     )
+  }
+
+  private func overlayBinding<Value: Equatable>(
+    index: Int,
+    keyPath: WritableKeyPath<OverlayItem, Value>
+  ) -> Binding<Value> {
+    Binding(
+      get: { project.overlays[index][keyPath: keyPath] },
+      set: { newValue in
+        guard project.overlays.indices.contains(index) else { return }
+        guard project.overlays[index][keyPath: keyPath] != newValue else {
+          return
+        }
+        project.recordUndoCheckpoint()
+        project.overlays[index][keyPath: keyPath] = newValue
+      }
+    )
+  }
+
+  private func recordTextEditingCheckpointIfNeeded(for id: UUID) {
+    guard !textEditingCheckpointIDs.contains(id) else { return }
+    project.recordUndoCheckpoint()
+    textEditingCheckpointIDs.insert(id)
   }
 
   private func colorSlider(

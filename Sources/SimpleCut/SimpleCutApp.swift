@@ -92,7 +92,6 @@ private struct SimpleCutCommands: Commands {
       Button("Выбрать все фрагменты") {
         project.selectAllClips()
       }
-      .keyboardShortcut("a")
       Divider()
       Button("Разрезать") {
         project.splitAtPlayhead()

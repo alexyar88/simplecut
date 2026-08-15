@@ -4,6 +4,7 @@ import CoreGraphics
 struct BuiltComposition {
   let asset: AVMutableComposition
   let videoComposition: AVMutableVideoComposition
+  let audioMix: AVAudioMix?
 }
 
 enum CompositionBuilder {
@@ -23,11 +24,6 @@ enum CompositionBuilder {
     else {
       throw EditorError.missingVideoTrack
     }
-    let compositionAudio = composition.addMutableTrack(
-      withMediaType: .audio,
-      preferredTrackID: kCMPersistentTrackID_Invalid
-    )
-
     let videoComposition = AVMutableVideoComposition()
     let renderSize = outputSize ?? canvas.size
     videoComposition.renderSize = renderSize
@@ -62,28 +58,6 @@ enum CompositionBuilder {
         of: videoTrack,
         at: insertionTime
       )
-
-      if replacementAudioURL == nil,
-        let audioTrack = try await asset.loadTracks(withMediaType: .audio).first
-      {
-        guard let compositionAudio else {
-          throw EditorError.exportFailed
-        }
-        let audioTrackRange = try await audioTrack.load(.timeRange)
-        let audioRange = CMTimeRangeGetIntersection(
-          sourceRange,
-          otherRange: audioTrackRange
-        )
-        if !audioRange.isEmpty {
-          let audioInsertionTime =
-            insertionTime + (audioRange.start - sourceRange.start)
-          try compositionAudio.insertTimeRange(
-            audioRange,
-            of: audioTrack,
-            at: audioInsertionTime
-          )
-        }
-      }
 
       let naturalSize = try await videoTrack.load(.naturalSize)
       let preferredTransform = try await videoTrack.load(.preferredTransform)
@@ -133,6 +107,7 @@ enum CompositionBuilder {
       insertionTime = insertionTime + sourceRange.duration
     }
 
+    let audioMix: AVAudioMix?
     if let replacementAudioURL {
       let replacementAsset = AVURLAsset(url: replacementAudioURL)
       guard
@@ -145,7 +120,15 @@ enum CompositionBuilder {
         insertionTime,
         try await replacementAsset.load(.duration)
       )
-      try compositionAudio?.insertTimeRange(
+      guard
+        let compositionAudio = composition.addMutableTrack(
+          withMediaType: .audio,
+          preferredTrackID: kCMPersistentTrackID_Invalid
+        )
+      else {
+        throw EditorError.exportFailed
+      }
+      try compositionAudio.insertTimeRange(
         CMTimeRange(
           start: .zero,
           duration: replacementDuration
@@ -153,12 +136,19 @@ enum CompositionBuilder {
         of: replacementTrack,
         at: .zero
       )
+      audioMix = nil
+    } else {
+      audioMix = try await AudioRenderService.insertAudio(
+        clips: clips,
+        into: composition
+      )
     }
 
     videoComposition.instructions = instructions
     return BuiltComposition(
       asset: composition,
-      videoComposition: videoComposition
+      videoComposition: videoComposition,
+      audioMix: audioMix
     )
   }
 }

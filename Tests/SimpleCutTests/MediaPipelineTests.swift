@@ -5,6 +5,77 @@ import XCTest
 @testable import SimpleCut
 
 final class MediaPipelineTests: XCTestCase {
+  func testWaveformUsesAudioPresentationTimestamps() async throws {
+    let source = FileManager.default.temporaryDirectory
+      .appendingPathComponent("SimpleCut-WaveformPTS-\(UUID().uuidString).mov")
+    defer { try? FileManager.default.removeItem(at: source) }
+    try await makeTestMovie(at: source, duration: 1, audioOffset: 0.3)
+
+    let fullWaveform = try await WaveformGenerator.samples(
+      from: [
+        VideoClip(
+          sourceURL: source,
+          sourceStart: 0,
+          duration: 1,
+          sourceDuration: 1
+        )
+      ],
+      targetSampleCount: 240
+    )
+    let fullOnset = try XCTUnwrap(
+      fullWaveform.firstIndex(where: { $0 > 0.05 })
+    )
+    XCTAssertEqual(
+      Double(fullOnset) / Double(fullWaveform.count),
+      0.3,
+      accuracy: 0.035
+    )
+
+    let trimmedWaveform = try await WaveformGenerator.samples(
+      from: [
+        VideoClip(
+          sourceURL: source,
+          sourceStart: 0.2,
+          duration: 0.8,
+          sourceDuration: 1
+        )
+      ],
+      targetSampleCount: 192
+    )
+    let trimmedOnset = try XCTUnwrap(
+      trimmedWaveform.firstIndex(where: { $0 > 0.05 })
+    )
+    XCTAssertEqual(
+      Double(trimmedOnset) / Double(trimmedWaveform.count) * 0.8,
+      0.1,
+      accuracy: 0.035
+    )
+  }
+
+  func testAutomaticColorAnalyzesRepresentativeVideoFrames() async throws {
+    let source = FileManager.default.temporaryDirectory
+      .appendingPathComponent("SimpleCut-AutoColor-\(UUID().uuidString).mov")
+    defer { try? FileManager.default.removeItem(at: source) }
+    try await makeTestMovie(at: source, duration: 1)
+
+    let settings = try await AutoColorAnalyzer.analyze(
+      clips: [
+        VideoClip(
+          sourceURL: source,
+          sourceStart: 0,
+          duration: 1,
+          sourceDuration: 1
+        )
+      ]
+    )
+
+    XCTAssertTrue(settings.brightness.isFinite)
+    XCTAssertTrue((-0.16...0.16).contains(settings.brightness))
+    XCTAssertTrue((0.86...1.24).contains(settings.contrast))
+    XCTAssertTrue((0.92...1.16).contains(settings.saturation))
+    XCTAssertTrue((-0.45...0.45).contains(settings.warmth))
+  }
+
   func testTechnicalPreRollIsRemovedFromFinishedRecording() async throws {
     let source = FileManager.default.temporaryDirectory
       .appendingPathComponent("SimpleCut-PreRoll-\(UUID().uuidString).mov")
@@ -203,6 +274,59 @@ final class MediaPipelineTests: XCTestCase {
     )
   }
 
+  func testAutomaticAudioFadesAndCrossfadePlan() async throws {
+    let source = FileManager.default.temporaryDirectory
+      .appendingPathComponent("SimpleCut-Fades-\(UUID().uuidString).wav")
+    defer { try? FileManager.default.removeItem(at: source) }
+    try makeAudio(at: source, duration: 1)
+
+    let composition = AVMutableComposition()
+    let insertedMix = try await AudioRenderService.insertAudio(
+      clips: [
+        VideoClip(sourceURL: source, sourceStart: 0.1, duration: 0.4),
+        VideoClip(sourceURL: source, sourceStart: 0.5, duration: 0.4),
+      ],
+      into: composition
+    )
+    let mix = try XCTUnwrap(insertedMix)
+
+    XCTAssertEqual(
+      AudioRenderService.edgeFadeDuration,
+      0.005,
+      accuracy: 0.000_001
+    )
+    XCTAssertEqual(
+      AudioRenderService.crossfadeDuration,
+      0.010,
+      accuracy: 0.000_001
+    )
+    XCTAssertEqual(composition.tracks(withMediaType: .audio).count, 2)
+    XCTAssertEqual(mix.inputParameters.count, 2)
+
+    let boundary = CMTime(seconds: 0.4, preferredTimescale: 600)
+    let ramps = mix.inputParameters.compactMap { input -> (Float, Float, Double)? in
+      var startVolume: Float = 0
+      var endVolume: Float = 0
+      var timeRange = CMTimeRange.invalid
+      guard
+        input.getVolumeRamp(
+          for: boundary,
+          startVolume: &startVolume,
+          endVolume: &endVolume,
+          timeRange: &timeRange
+        )
+      else { return nil }
+      return (startVolume, endVolume, timeRange.duration.seconds)
+    }
+    XCTAssertEqual(ramps.count, 2)
+    XCTAssertTrue(
+      ramps.contains { $0.0 == 1 && $0.1 == 0 && abs($0.2 - 0.010) < 0.000_001 }
+    )
+    XCTAssertTrue(
+      ramps.contains { $0.0 == 0 && $0.1 == 1 && abs($0.2 - 0.010) < 0.000_001 }
+    )
+  }
+
   private func audioLevels(at url: URL) throws -> (average: Float, peak: Float) {
     let file = try AVAudioFile(forReading: url)
     let format = file.processingFormat
@@ -271,10 +395,19 @@ final class MediaPipelineTests: XCTestCase {
     )
   }
 
-  private func makeTestMovie(at destination: URL, duration: Double) async throws {
+  private func makeTestMovie(
+    at destination: URL,
+    duration: Double,
+    audioOffset: Double = 0
+  ) async throws {
     let directory = destination.deletingLastPathComponent()
-    let videoURL = directory.appendingPathComponent("video.mov")
-    let audioURL = directory.appendingPathComponent("audio.wav")
+    let stem = destination.deletingPathExtension().lastPathComponent
+    let videoURL = directory.appendingPathComponent("\(stem)-video.mov")
+    let audioURL = directory.appendingPathComponent("\(stem)-audio.wav")
+    defer {
+      try? FileManager.default.removeItem(at: videoURL)
+      try? FileManager.default.removeItem(at: audioURL)
+    }
     try await makeVideo(at: videoURL, duration: duration)
     try makeAudio(at: audioURL, duration: duration)
 
@@ -308,7 +441,19 @@ final class MediaPipelineTests: XCTestCase {
         preferredTrackID: kCMPersistentTrackID_Invalid
       )
     )
-    try audioTrack.insertTimeRange(range, of: audioSource, at: .zero)
+    let clampedAudioOffset = min(max(0, audioOffset), duration)
+    let audioRange = CMTimeRange(
+      start: .zero,
+      duration: CMTime(
+        seconds: duration - clampedAudioOffset,
+        preferredTimescale: 600
+      )
+    )
+    try audioTrack.insertTimeRange(
+      audioRange,
+      of: audioSource,
+      at: CMTime(seconds: clampedAudioOffset, preferredTimescale: 600)
+    )
 
     let session = try XCTUnwrap(
       AVAssetExportSession(

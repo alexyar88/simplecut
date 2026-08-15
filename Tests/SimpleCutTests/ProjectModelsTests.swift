@@ -1,10 +1,188 @@
 import AVFoundation
+import Combine
 import CoreGraphics
 import XCTest
 
 @testable import SimpleCut
 
 final class ProjectModelsTests: XCTestCase {
+  func testPreviewSizesAreReducedAndKeepCanvasAspectRatio() {
+    XCTAssertEqual(CanvasPreset.vertical.previewSize, CGSize(width: 540, height: 960))
+    XCTAssertEqual(CanvasPreset.horizontal.previewSize, CGSize(width: 960, height: 540))
+    XCTAssertEqual(CanvasPreset.square.previewSize, CGSize(width: 960, height: 960))
+  }
+
+  func testTimelineInteractionMapsAndClampsTheWholeTrack() {
+    XCTAssertEqual(
+      TimelineInteractionGeometry.contentX(
+        viewportX: 140,
+        contentMinX: -320
+      ),
+      460
+    )
+    XCTAssertEqual(
+      TimelineInteractionGeometry.time(at: -20, width: 400, duration: 10),
+      0
+    )
+    XCTAssertEqual(
+      TimelineInteractionGeometry.time(at: 100, width: 400, duration: 10),
+      2.5
+    )
+    XCTAssertEqual(
+      TimelineInteractionGeometry.time(at: 600, width: 400, duration: 10),
+      10
+    )
+  }
+
+  @MainActor
+  func testPlayheadUpdatesDoNotInvalidateWholeProject() {
+    let project = EditorProject(loadRecovery: false)
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/playback-state.mov"),
+        sourceStart: 0,
+        duration: 5
+      )
+    ]
+    var projectUpdates = 0
+    var playbackUpdates = 0
+    let projectObserver = project.objectWillChange.sink {
+      projectUpdates += 1
+    }
+    let playbackObserver = project.playback.objectWillChange.sink {
+      playbackUpdates += 1
+    }
+
+    project.seek(to: 2)
+
+    XCTAssertEqual(project.playhead, 2)
+    XCTAssertEqual(projectUpdates, 0)
+    XCTAssertGreaterThan(playbackUpdates, 0)
+    withExtendedLifetime((projectObserver, playbackObserver)) {}
+  }
+
+  func testWaveformPeakResamplingKeepsTransientsAndSilence() {
+    let resampled = WaveformPresentation.peakResampled(
+      [0, 0, 0.9, 0, 0, 0, 0.4, 0],
+      targetSampleCount: 4
+    )
+
+    XCTAssertEqual(resampled, [0, 0.9, 0, 0.4])
+  }
+
+  func testWaveformRemappingFollowsTrimAndReorderImmediately() {
+    let source = URL(fileURLWithPath: "/tmp/waveform-remap.mov")
+    let first = VideoClip(
+      sourceURL: source,
+      sourceStart: 0,
+      duration: 2,
+      sourceDuration: 4
+    )
+    let second = VideoClip(
+      sourceURL: source,
+      sourceStart: 2,
+      duration: 2,
+      sourceDuration: 4
+    )
+    let waveform: [Float] = [0.1, 0.2, 0.7, 0.8]
+
+    let reordered = WaveformPresentation.remapped(
+      waveform,
+      from: [first, second],
+      to: [second, first]
+    )
+    XCTAssertEqual(reordered, [0.7, 0.8, 0.1, 0.2])
+
+    var trimmed = second
+    trimmed.sourceStart = 3
+    trimmed.duration = 1
+    let trimmedWaveform = WaveformPresentation.remapped(
+      waveform,
+      from: [first, second],
+      to: [trimmed]
+    )
+    XCTAssertEqual(trimmedWaveform, [0.8])
+  }
+
+  func testAutomaticColorRespondsToExposureAndColorCast() {
+    let darkAndBlue = AutoColorAnalyzer.suggestedSettings(
+      luminance: [0.05, 0.08, 0.12, 0.18, 0.22],
+      red: 10,
+      blue: 16,
+      averageChroma: 0.12
+    )
+    XCTAssertGreaterThan(darkAndBlue.brightness, 0)
+    XCTAssertGreaterThan(darkAndBlue.warmth, 0)
+    XCTAssertGreaterThan(darkAndBlue.saturation, 1)
+
+    let brightAndWarm = AutoColorAnalyzer.suggestedSettings(
+      luminance: [0.72, 0.78, 0.84, 0.90],
+      red: 18,
+      blue: 10,
+      averageChroma: 0.28
+    )
+    XCTAssertLessThan(brightAndWarm.brightness, 0)
+    XCTAssertLessThan(brightAndWarm.warmth, 0)
+    XCTAssertLessThan(brightAndWarm.saturation, 1)
+  }
+
+  func testVerticalCaptionDefaultUsesSocialSafeArea() {
+    let style = CaptionStyle.defaultStyle(for: .vertical)
+    let safeArea = try! XCTUnwrap(CanvasPreset.vertical.socialSafeArea)
+
+    XCTAssertEqual(style.normalizedY, 0.70)
+    XCTAssertTrue(safeArea.contains(CGPoint(x: style.normalizedX, y: style.normalizedY)))
+    XCTAssertNil(CanvasPreset.horizontal.socialSafeArea)
+    XCTAssertEqual(
+      CaptionStyle().adaptingBuiltInPosition(to: .vertical).normalizedY,
+      0.70
+    )
+    XCTAssertEqual(
+      CaptionStyle(normalizedY: 0.61).adaptingBuiltInPosition(to: .vertical)
+        .normalizedY,
+      0.61
+    )
+  }
+
+  @MainActor
+  func testLeadingTrimPreviewMovesGrabbedEdgeAndLeavesTemporaryGap() {
+    let clip = VideoClip(
+      sourceURL: URL(fileURLWithPath: "/tmp/trim-preview.mov"),
+      sourceStart: 2,
+      duration: 4,
+      sourceDuration: 10
+    )
+    let preview = TrimPreviewGeometry.adjustment(
+      for: clip,
+      edge: .leading,
+      translation: 80,
+      pixelsPerSecond: 100
+    )
+
+    XCTAssertEqual(preview.offset, 80)
+    XCTAssertEqual(preview.width, -80)
+    XCTAssertEqual(preview.offset + preview.width, 0)
+  }
+
+  @MainActor
+  func testCommittedTrimCreatesOneUndoStep() {
+    let project = EditorProject(loadRecovery: false)
+    let clip = VideoClip(
+      sourceURL: URL(fileURLWithPath: "/tmp/interactive-trim.mov"),
+      sourceStart: 0,
+      duration: 4,
+      sourceDuration: 4
+    )
+    project.clips = [clip]
+
+    project.resizeClip(id: clip.id, edge: .trailing, by: -1)
+    XCTAssertEqual(project.duration, 3)
+
+    project.undo()
+    XCTAssertEqual(project.duration, 4)
+    XCTAssertFalse(project.canUndo)
+  }
+
   func testWaveformNormalizationRaisesVisibleLevelAndMarksLimiter() {
     let waveform: [Float] = [0.08, 0.2, 0.5]
     let original = WaveformPresentation.samples(
@@ -587,6 +765,47 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertEqual(project.timelineNavigationStep, 1.0 / 30)
     project.timelineZoom = 5
     XCTAssertEqual(project.timelineNavigationStep, 1.0 / 150)
+  }
+
+  func testPreviewAtTimelineEndUsesLastVisibleFrame() {
+    XCTAssertEqual(
+      EditorProject.previewTime(for: 33.3, duration: 33.3),
+      33.3 - 1.0 / 30.0,
+      accuracy: 0.0001
+    )
+    XCTAssertEqual(
+      EditorProject.previewTime(for: 12.4, duration: 33.3),
+      12.4,
+      accuracy: 0.0001
+    )
+    XCTAssertEqual(
+      EditorProject.previewTime(for: 0, duration: 0),
+      0
+    )
+  }
+
+  @MainActor
+  func testSeekingBetweenEditPointsUsesClipBoundaries() {
+    let source = URL(fileURLWithPath: "/tmp/source.mov")
+    let project = EditorProject(loadRecovery: false)
+    project.clips = [
+      VideoClip(sourceURL: source, sourceStart: 0, duration: 2),
+      VideoClip(sourceURL: source, sourceStart: 2, duration: 3),
+      VideoClip(sourceURL: source, sourceStart: 5, duration: 4),
+    ]
+
+    project.seek(to: 4)
+    project.seekToPreviousEdit()
+    XCTAssertEqual(project.playhead, 2)
+    project.seekToPreviousEdit()
+    XCTAssertEqual(project.playhead, 0)
+
+    project.seekToNextEdit()
+    XCTAssertEqual(project.playhead, 2)
+    project.seekToNextEdit()
+    XCTAssertEqual(project.playhead, 5)
+    project.seekToNextEdit()
+    XCTAssertEqual(project.playhead, 9)
   }
 
   @MainActor

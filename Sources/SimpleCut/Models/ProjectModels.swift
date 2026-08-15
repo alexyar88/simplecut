@@ -27,6 +27,25 @@ enum CanvasPreset: String, Codable, CaseIterable, Identifiable {
   var aspectRatio: CGFloat {
     size.width / size.height
   }
+
+  /// Editing uses fewer pixels than export. The dimensions stay even so they
+  /// remain suitable for hardware-backed video pipelines.
+  var previewSize: CGSize {
+    let maximumDimension: CGFloat = 960
+    let scale = min(1, maximumDimension / max(size.width, size.height))
+    func even(_ value: CGFloat) -> CGFloat {
+      max(2, (value * scale / 2).rounded() * 2)
+    }
+    return CGSize(width: even(size.width), height: even(size.height))
+  }
+
+  /// A conservative content area that stays clear of the controls used by
+  /// short-form social video players. Coordinates use the preview's top-left
+  /// origin and are normalized to the canvas.
+  var socialSafeArea: CGRect? {
+    guard self == .vertical else { return nil }
+    return CGRect(x: 0.07, y: 0.08, width: 0.86, height: 0.67)
+  }
 }
 
 enum VideoScalingMode: String, Codable, CaseIterable, Identifiable {
@@ -561,6 +580,22 @@ struct CaptionStyle: Codable, Equatable {
     cornerRadius = item.cornerRadius
   }
 
+  static func defaultStyle(for canvas: CanvasPreset) -> CaptionStyle {
+    var style = CaptionStyle()
+    if canvas == .vertical {
+      style.normalizedY = 0.70
+    }
+    return style
+  }
+
+  func adaptingBuiltInPosition(to canvas: CanvasPreset) -> CaptionStyle {
+    let isBuiltIn = CaptionStylePreset.allCases.contains { $0.style == self }
+    guard isBuiltIn else { return self }
+    var adapted = self
+    adapted.normalizedY = CaptionStyle.defaultStyle(for: canvas).normalizedY
+    return adapted
+  }
+
   func apply(to item: inout OverlayItem) {
     item.normalizedX = normalizedX
     item.normalizedY = normalizedY
@@ -634,6 +669,59 @@ struct ProjectFile: Codable {
 enum TrimEdge {
   case leading
   case trailing
+}
+
+struct TrimPreviewAdjustment: Equatable {
+  let offset: CGFloat
+  let width: CGFloat
+}
+
+enum TimelineInteractionGeometry {
+  static func contentX(
+    viewportX: CGFloat,
+    contentMinX: CGFloat
+  ) -> CGFloat {
+    viewportX - contentMinX
+  }
+
+  static func time(
+    at x: CGFloat,
+    width: CGFloat,
+    duration: Double
+  ) -> Double {
+    guard width > 0, duration > 0 else { return 0 }
+    let ratio = min(1, max(0, x / width))
+    return Double(ratio) * duration
+  }
+}
+
+enum TrimPreviewGeometry {
+  static func adjustment(
+    for clip: VideoClip,
+    edge: TrimEdge,
+    translation: CGFloat,
+    pixelsPerSecond: Double
+  ) -> TrimPreviewAdjustment {
+    let scale = max(pixelsPerSecond, 0.01)
+    let minimumDelta: CGFloat
+    let maximumDelta: CGFloat
+    switch edge {
+    case .leading:
+      minimumDelta = -clip.sourceStart * scale
+      maximumDelta = max(0, clip.duration - 0.1) * scale
+      let delta = min(max(translation, minimumDelta), maximumDelta)
+      return TrimPreviewAdjustment(offset: delta, width: -delta)
+    case .trailing:
+      minimumDelta = -max(0, clip.duration - 0.1) * scale
+      maximumDelta =
+        max(
+          0,
+          (clip.sourceDuration ?? clip.sourceEnd) - clip.sourceEnd
+        ) * scale
+      let delta = min(max(translation, minimumDelta), maximumDelta)
+      return TrimPreviewAdjustment(offset: 0, width: delta)
+    }
+  }
 }
 
 struct CaptionDraft: Equatable, Sendable {
