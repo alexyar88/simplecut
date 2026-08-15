@@ -1116,124 +1116,129 @@ struct TimelineView: View {
       RoundedRectangle(cornerRadius: 6)
         .fill(trackColor(for: kind).opacity(0.08))
       ForEach(project.overlays.filter { $0.kind == kind }) { item in
-        let pixelsPerSecond = trackWidth / max(project.duration, 0.01)
-        let width =
-          project.duration > 0
-          ? trackWidth * item.duration / project.duration
-          : 0
-        let x =
-          project.duration > 0
-          ? trackWidth * item.startTime / project.duration
-          : 0
-        let adjustment = overlayAdjustment(
-          for: item,
-          pixelsPerSecond: pixelsPerSecond
-        )
-        let adjustedWidth = max(2, width + adjustment.width)
-        RoundedRectangle(cornerRadius: 5)
-          .fill(
-            item.kind == .caption
-              ? .blue : (item.kind == .text ? .purple : .orange)
-          )
-          .overlay(alignment: .leading) {
-            if adjustedWidth >= 36 {
-              Text(layerTitle(item))
-                .font(.caption2)
-                .lineLimit(1)
-                .padding(.horizontal, 6)
-            }
-          }
-          .overlay {
-            if project.selectedOverlayID == item.id {
-              ZStack {
-                RoundedRectangle(cornerRadius: 5)
-                  .stroke(Color.white, lineWidth: 2)
-                  .shadow(color: Color.accentColor, radius: 3)
-                HStack(spacing: 0) {
-                  overlayTrimHandle(
-                    item: item,
-                    edge: .leading,
-                    pixelsPerSecond: pixelsPerSecond
-                  )
-                  Spacer(minLength: 0)
-                  overlayTrimHandle(
-                    item: item,
-                    edge: .trailing,
-                    pixelsPerSecond: pixelsPerSecond
-                  )
-                }
-              }
-            }
-          }
-          .frame(width: adjustedWidth, height: 28)
-          .contentShape(Rectangle().inset(by: -3))
-          .gesture(
-            DragGesture(
-              minimumDistance: 0,
-              coordinateSpace: .global
-            )
-              .onChanged { value in
-                guard abs(value.translation.width) >= 3 else { return }
-                activeOverlayID = item.id
-                activeOverlayEdge = nil
-                overlayDragOffset = value.translation.width
-                project.clearClipSelection()
-                project.selectedOverlayID = item.id
-              }
-              .onEnded { value in
-                if abs(value.translation.width) < 3,
-                  abs(value.translation.height) < 3
-                {
-                  focusTimeline()
-                  project.selectOverlay(id: item.id, seekToStart: true)
-                  resetOverlayGesture()
-                  return
-                }
-                let delta = clampedOverlayMove(
-                  item: item,
-                  requestedOffset: value.translation.width,
-                  pixelsPerSecond: pixelsPerSecond
-                )
-                if abs(delta) > 0.5 {
-                  project.recordUndoCheckpoint()
-                  project.moveOverlay(
-                    id: item.id,
-                    by: delta / max(pixelsPerSecond, 0.01)
-                  )
-                }
-                resetOverlayGesture()
-              }
-          )
-          .help(
-            "\(layerTitle(item)) · \(item.startTime.timestamp) · \(item.duration.timestamp)"
-          )
-          .accessibilityElement(children: .ignore)
-          .accessibilityLabel(layerTitle(item))
-          .accessibilityValue(
-            "\(item.startTime.timestamp), длительность \(item.duration.timestamp)"
-          )
-          .accessibilityAddTraits(.isButton)
-          .accessibilityAction {
-            focusTimeline()
-            project.selectOverlay(id: item.id, seekToStart: true)
-          }
-          .accessibilityAction(named: "Сдвинуть на 0,1 секунды влево") {
-            project.recordUndoCheckpoint()
-            project.moveOverlay(id: item.id, by: -0.1)
-          }
-          .accessibilityAction(named: "Сдвинуть на 0,1 секунды вправо") {
-            project.recordUndoCheckpoint()
-            project.moveOverlay(id: item.id, by: 0.1)
-          }
-          .position(
-            x: x + adjustment.offset + adjustedWidth / 2,
-            y: 17
-          )
+        overlayTrackItem(item, trackWidth: trackWidth)
       }
     }
     .frame(height: 34)
     .accessibilityElement(children: .contain)
     .accessibilityLabel(trackTitle(for: kind))
+  }
+
+  private func overlayTrackItem(
+    _ item: OverlayItem,
+    trackWidth: CGFloat
+  ) -> some View {
+    let pixelsPerSecond = trackWidth / max(project.duration, 0.01)
+    let width = project.duration > 0
+      ? trackWidth * item.duration / project.duration
+      : 0
+    let x = project.duration > 0
+      ? trackWidth * item.startTime / project.duration
+      : 0
+    let adjustment = overlayAdjustment(
+      for: item,
+      pixelsPerSecond: pixelsPerSecond
+    )
+    let adjustedWidth = max(2, width + adjustment.width)
+
+    return RoundedRectangle(cornerRadius: 5)
+      .fill(trackColor(for: item.kind))
+      .overlay(alignment: .leading) {
+        if adjustedWidth >= 36 {
+          Text(layerTitle(item))
+            .font(.caption2)
+            .lineLimit(1)
+            .padding(.horizontal, 6)
+        }
+      }
+      .overlay {
+        if project.selectedOverlayID == item.id {
+          ZStack {
+            RoundedRectangle(cornerRadius: 5)
+              .stroke(Color.white, lineWidth: 2)
+              .shadow(color: Color.accentColor, radius: 3)
+            HStack(spacing: 0) {
+              overlayTrimHandle(
+                item: item,
+                edge: .leading,
+                pixelsPerSecond: pixelsPerSecond
+              )
+              Spacer(minLength: 0)
+              overlayTrimHandle(
+                item: item,
+                edge: .trailing,
+                pixelsPerSecond: pixelsPerSecond
+              )
+            }
+          }
+        }
+      }
+      .frame(width: adjustedWidth, height: 28)
+      .contentShape(Rectangle().inset(by: -3))
+      .gesture(overlayMoveGesture(for: item, pixelsPerSecond: pixelsPerSecond))
+      .help(
+        "\(layerTitle(item)) · \(item.startTime.timestamp) · \(item.duration.timestamp)"
+      )
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(layerTitle(item))
+      .accessibilityValue(
+        "\(item.startTime.timestamp), длительность \(item.duration.timestamp)"
+      )
+      .accessibilityAddTraits(.isButton)
+      .accessibilityAction {
+        focusTimeline()
+        project.selectOverlay(id: item.id, seekToStart: true)
+      }
+      .accessibilityAction(named: "Сдвинуть на 0,1 секунды влево") {
+        project.recordUndoCheckpoint()
+        project.moveOverlay(id: item.id, by: -0.1)
+      }
+      .accessibilityAction(named: "Сдвинуть на 0,1 секунды вправо") {
+        project.recordUndoCheckpoint()
+        project.moveOverlay(id: item.id, by: 0.1)
+      }
+      .position(
+        x: x + adjustment.offset + adjustedWidth / 2,
+        y: 17
+      )
+  }
+
+  private func overlayMoveGesture(
+    for item: OverlayItem,
+    pixelsPerSecond: CGFloat
+  ) -> some Gesture {
+    DragGesture(minimumDistance: 0, coordinateSpace: .global)
+      .onChanged { value in
+        guard abs(value.translation.width) >= 3 else { return }
+        activeOverlayID = item.id
+        activeOverlayEdge = nil
+        overlayDragOffset = value.translation.width
+        project.clearClipSelection()
+        project.selectedOverlayID = item.id
+      }
+      .onEnded { value in
+        if abs(value.translation.width) < 3,
+          abs(value.translation.height) < 3
+        {
+          focusTimeline()
+          project.selectOverlay(id: item.id, seekToStart: true)
+          resetOverlayGesture()
+          return
+        }
+        let delta = clampedOverlayMove(
+          item: item,
+          requestedOffset: value.translation.width,
+          pixelsPerSecond: pixelsPerSecond
+        )
+        if abs(delta) > 0.5 {
+          project.recordUndoCheckpoint()
+          project.moveOverlay(
+            id: item.id,
+            by: delta / max(pixelsPerSecond, 0.01)
+          )
+        }
+        resetOverlayGesture()
+      }
   }
 
   private func trackColor(for kind: OverlayKind) -> Color {
