@@ -1,0 +1,23 @@
+diff --git a/Sources/Hub/Hub.swift b/Sources/Hub/Hub.swift
+--- a/Sources/Hub/Hub.swift
++++ b/Sources/Hub/Hub.swift
+@@ -326,7 +326,18 @@ extension Hub {
+         // Fallback tokenizer configuration files are located in the `Sources/Hub/Resources` directory
+         // On Linux, Bundle.module may not be available if resources aren't properly bundled
+         #if canImport(Darwin)
+-        guard let url = Bundle.module.url(forResource: fallbackTokenizerConfigBaseName, withExtension: "json") else {
++        let directURL = Bundle.main.url(
++            forResource: fallbackTokenizerConfigBaseName,
++            withExtension: "json"
++        )
++        let swiftPMBundle = Bundle(
++            path: Bundle.main.bundleURL
++                .appendingPathComponent("swift-transformers_Hub.bundle").path
++        )
++        guard let url = directURL ?? swiftPMBundle?.url(
++            forResource: fallbackTokenizerConfigBaseName,
++            withExtension: "json"
++        ) else {
+             return nil
+         }
+         #else

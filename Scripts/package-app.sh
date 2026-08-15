@@ -3,6 +3,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+swift package resolve
+transformers_checkout="$PWD/.build/checkouts/swift-transformers"
+transformers_patch="$PWD/Scripts/patches/swift-transformers-app-resources.patch"
+if grep -q "Bundle.module.url" \
+  "$transformers_checkout/Sources/Hub/Hub.swift"; then
+  git -C "$transformers_checkout" apply "$transformers_patch"
+fi
+
 swift build -c release
 binary_directory="$(swift build -c release --show-bin-path)"
 application_directory="$PWD/build/SimpleCut.app"
@@ -10,10 +18,6 @@ application_directory="$PWD/build/SimpleCut.app"
 rm -rf "$application_directory"
 mkdir -p "$application_directory/Contents/MacOS"
 mkdir -p "$application_directory/Contents/Resources"
-codesign --force --sign - \
-  --entitlements "Resources/SimpleCut.entitlements" \
-  "$binary_directory/SimpleCut"
-codesign --verify --strict "$binary_directory/SimpleCut"
 cp "$binary_directory/SimpleCut" "$application_directory/Contents/MacOS/SimpleCut"
 cp "Resources/Info.plist" "$application_directory/Contents/Info.plist"
 xcrun actool \
@@ -25,7 +29,12 @@ xcrun actool \
   "Resources/Assets.xcassets"
 rm "$application_directory/Contents/asset-info.plist"
 for resource_bundle in "$binary_directory"/*.bundle(N); do
-  bundle_name="${resource_bundle:t}"
-  cp -R "$resource_bundle" "$application_directory/$bundle_name"
+  for resource in "$resource_bundle"/*(DN); do
+    cp -R "$resource" "$application_directory/Contents/Resources/"
+  done
 done
+codesign --force --deep --sign - \
+  --entitlements "Resources/SimpleCut.entitlements" \
+  "$application_directory"
+codesign --verify --deep --strict "$application_directory"
 echo "$application_directory"
