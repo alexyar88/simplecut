@@ -1040,21 +1040,12 @@ private struct TeleprompterOverlay: View {
           fontSize * 1.35 * max(30, wordsPerMinute) / 420
         let offset = isRunning ? elapsed * pointsPerSecond : 0
 
-        ScrollView(.vertical) {
-          Text(text)
-            .font(.system(size: fontSize, weight: .semibold))
-            .multilineTextAlignment(.center)
-            .foregroundStyle(.white)
-            .shadow(color: .black.opacity(0.9), radius: 3)
-            .padding(.horizontal, 22)
-            .padding(.top, 14)
-            .padding(.bottom, offset + 80)
-            .frame(maxWidth: .infinity)
-            .fixedSize(horizontal: false, vertical: true)
-            .offset(y: -offset)
-        }
-        .scrollIndicators(isRunning ? .hidden : .visible)
-        .scrollDisabled(isRunning)
+        TeleprompterScrollView(
+          text: text,
+          fontSize: fontSize,
+          automaticOffset: offset,
+          isRunning: isRunning
+        )
       }
       .frame(
         maxWidth: .infinity,
@@ -1085,6 +1076,124 @@ private struct TeleprompterOverlay: View {
     case .square:
       280
     }
+  }
+}
+
+private struct TeleprompterScrollView: NSViewRepresentable {
+  let text: String
+  let fontSize: Double
+  let automaticOffset: CGFloat
+  let isRunning: Bool
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator()
+  }
+
+  func makeNSView(context: Context) -> NSScrollView {
+    let scrollView = NSScrollView()
+    scrollView.drawsBackground = false
+    scrollView.hasVerticalScroller = true
+    scrollView.hasHorizontalScroller = false
+    scrollView.autohidesScrollers = true
+    scrollView.scrollerStyle = .overlay
+    scrollView.verticalScrollElasticity = .allowed
+
+    let textView = NSTextView(frame: .zero)
+    textView.drawsBackground = false
+    textView.isEditable = false
+    textView.isSelectable = false
+    textView.isRichText = false
+    textView.isHorizontallyResizable = false
+    textView.isVerticallyResizable = true
+    textView.textContainerInset = NSSize(width: 22, height: 14)
+    textView.textContainer?.widthTracksTextView = true
+    textView.textContainer?.heightTracksTextView = false
+    textView.textContainer?.lineFragmentPadding = 0
+    textView.textContainer?.containerSize = NSSize(
+      width: 0,
+      height: CGFloat.greatestFiniteMagnitude
+    )
+    scrollView.documentView = textView
+    context.coordinator.textView = textView
+    return scrollView
+  }
+
+  func updateNSView(_ scrollView: NSScrollView, context: Context) {
+    guard let textView = context.coordinator.textView else { return }
+
+    let availableWidth = max(1, scrollView.contentSize.width)
+    let contentChanged = context.coordinator.text != text
+      || context.coordinator.fontSize != fontSize
+      || abs(textView.frame.width - availableWidth) > 0.5
+
+    if contentChanged {
+      let paragraph = NSMutableParagraphStyle()
+      paragraph.alignment = .center
+      paragraph.lineBreakMode = .byWordWrapping
+      textView.textStorage?.setAttributedString(
+        NSAttributedString(
+          string: text,
+          attributes: [
+            .font: NSFont.systemFont(
+              ofSize: fontSize,
+              weight: .semibold
+            ),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: paragraph,
+            .shadow: textShadow,
+          ]
+        )
+      )
+      context.coordinator.text = text
+      context.coordinator.fontSize = fontSize
+
+      textView.frame.size.width = availableWidth
+      if let layoutManager = textView.layoutManager,
+        let textContainer = textView.textContainer
+      {
+        layoutManager.ensureLayout(for: textContainer)
+        let textHeight = layoutManager.usedRect(for: textContainer).height
+        textView.frame.size.height = max(
+          scrollView.contentSize.height,
+          ceil(textHeight + textView.textContainerInset.height * 2 + 80)
+        )
+      }
+    }
+
+    let coordinator = context.coordinator
+    guard isRunning else {
+      coordinator.previousAutomaticOffset = nil
+      return
+    }
+
+    if let previousOffset = coordinator.previousAutomaticOffset {
+      let delta = automaticOffset - previousOffset
+      if abs(delta) > 0.001 {
+        let currentOrigin = scrollView.contentView.bounds.origin
+        let maximumY = max(
+          0,
+          textView.frame.height - scrollView.contentSize.height
+        )
+        let nextY = min(maximumY, max(0, currentOrigin.y + delta))
+        scrollView.contentView.scroll(to: CGPoint(x: 0, y: nextY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+      }
+    }
+    coordinator.previousAutomaticOffset = automaticOffset
+  }
+
+  private var textShadow: NSShadow {
+    let shadow = NSShadow()
+    shadow.shadowColor = NSColor.black.withAlphaComponent(0.9)
+    shadow.shadowBlurRadius = 3
+    return shadow
+  }
+
+  final class Coordinator {
+    weak var textView: NSTextView?
+    var text: String?
+    var fontSize: Double?
+    var previousAutomaticOffset: CGFloat?
   }
 }
 

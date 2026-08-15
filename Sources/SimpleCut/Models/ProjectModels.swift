@@ -314,6 +314,7 @@ struct OverlayItem: Identifiable, Codable, Equatable {
   var fontWeight: CaptionFontWeight = .semibold
   var textAlignment: OverlayTextAlignment = .center
   var foregroundHex: String = "#FFFFFF"
+  var backgroundEnabled: Bool = true
   var backgroundHex: String = "#00000099"
   var strokeHex: String = "#000000FF"
   var strokeWidth: Double = 0
@@ -323,7 +324,8 @@ struct OverlayItem: Identifiable, Codable, Equatable {
   enum CodingKeys: String, CodingKey {
     case id, kind, startTime, duration, normalizedX, normalizedY
     case normalizedWidth, rotation, opacity, text, imageURL, fontSize
-    case fontName, fontWeight, textAlignment, foregroundHex, backgroundHex
+    case fontName, fontWeight, textAlignment, foregroundHex, backgroundEnabled
+    case backgroundHex
     case strokeHex, strokeWidth, textPadding, cornerRadius
   }
 
@@ -344,6 +346,7 @@ struct OverlayItem: Identifiable, Codable, Equatable {
     fontWeight: CaptionFontWeight = .semibold,
     textAlignment: OverlayTextAlignment = .center,
     foregroundHex: String = "#FFFFFF",
+    backgroundEnabled: Bool = true,
     backgroundHex: String = "#00000099",
     strokeHex: String = "#000000FF",
     strokeWidth: Double = 0,
@@ -366,6 +369,7 @@ struct OverlayItem: Identifiable, Codable, Equatable {
     self.fontWeight = fontWeight
     self.textAlignment = textAlignment
     self.foregroundHex = foregroundHex
+    self.backgroundEnabled = backgroundEnabled
     self.backgroundHex = backgroundHex
     self.strokeHex = strokeHex
     self.strokeWidth = strokeWidth
@@ -405,6 +409,9 @@ struct OverlayItem: Identifiable, Codable, Equatable {
     backgroundHex =
       try values.decodeIfPresent(String.self, forKey: .backgroundHex)
       ?? "#00000099"
+    backgroundEnabled =
+      try values.decodeIfPresent(Bool.self, forKey: .backgroundEnabled)
+      ?? legacyBackgroundEnabled(for: backgroundHex)
     strokeHex =
       try values.decodeIfPresent(String.self, forKey: .strokeHex)
       ?? "#000000FF"
@@ -465,6 +472,7 @@ enum CaptionStylePreset: String, CaseIterable, Identifiable {
       CaptionStyle(
         fontWeight: .bold,
         foregroundHex: "#FFFFFFFF",
+        backgroundEnabled: false,
         backgroundHex: "#00000000",
         strokeHex: "#000000FF",
         strokeWidth: 3,
@@ -484,6 +492,7 @@ struct CaptionStyle: Codable, Equatable {
   var fontWeight = CaptionFontWeight.semibold
   var textAlignment = OverlayTextAlignment.center
   var foregroundHex = "#FFFFFFFF"
+  var backgroundEnabled = true
   var backgroundHex = "#000000B3"
   var strokeHex = "#000000FF"
   var strokeWidth = 0.0
@@ -492,7 +501,8 @@ struct CaptionStyle: Codable, Equatable {
 
   enum CodingKeys: String, CodingKey {
     case normalizedX, normalizedY, normalizedWidth, fontSize, fontName
-    case fontWeight, textAlignment, foregroundHex, backgroundHex
+    case fontWeight, textAlignment, foregroundHex, backgroundEnabled
+    case backgroundHex
     case strokeHex, strokeWidth, textPadding, cornerRadius
   }
 
@@ -505,6 +515,7 @@ struct CaptionStyle: Codable, Equatable {
     fontWeight: CaptionFontWeight = .semibold,
     textAlignment: OverlayTextAlignment = .center,
     foregroundHex: String = "#FFFFFFFF",
+    backgroundEnabled: Bool = true,
     backgroundHex: String = "#000000B3",
     strokeHex: String = "#000000FF",
     strokeWidth: Double = 0,
@@ -519,6 +530,7 @@ struct CaptionStyle: Codable, Equatable {
     self.fontWeight = fontWeight
     self.textAlignment = textAlignment
     self.foregroundHex = foregroundHex
+    self.backgroundEnabled = backgroundEnabled
     self.backgroundHex = backgroundHex
     self.strokeHex = strokeHex
     self.strokeWidth = strokeWidth
@@ -553,6 +565,9 @@ struct CaptionStyle: Codable, Equatable {
     backgroundHex =
       try values.decodeIfPresent(String.self, forKey: .backgroundHex)
       ?? "#000000B3"
+    backgroundEnabled =
+      try values.decodeIfPresent(Bool.self, forKey: .backgroundEnabled)
+      ?? legacyBackgroundEnabled(for: backgroundHex)
     strokeHex =
       try values.decodeIfPresent(String.self, forKey: .strokeHex)
       ?? "#000000FF"
@@ -573,6 +588,7 @@ struct CaptionStyle: Codable, Equatable {
     fontWeight = item.fontWeight
     textAlignment = item.textAlignment
     foregroundHex = item.foregroundHex
+    backgroundEnabled = item.backgroundEnabled
     backgroundHex = item.backgroundHex
     strokeHex = item.strokeHex
     strokeWidth = item.strokeWidth
@@ -605,12 +621,19 @@ struct CaptionStyle: Codable, Equatable {
     item.fontWeight = fontWeight
     item.textAlignment = textAlignment
     item.foregroundHex = foregroundHex
+    item.backgroundEnabled = backgroundEnabled
     item.backgroundHex = backgroundHex
     item.strokeHex = strokeHex
     item.strokeWidth = strokeWidth
     item.textPadding = textPadding
     item.cornerRadius = cornerRadius
   }
+}
+
+private func legacyBackgroundEnabled(for hex: String) -> Bool {
+  let value = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+  guard value.count == 8 else { return true }
+  return !value.hasSuffix("00")
 }
 
 struct ProjectFile: Codable {
@@ -700,6 +723,51 @@ enum TimelineInteractionGeometry {
     threshold: CGFloat
   ) -> CGFloat {
     abs(x - targetX) <= max(0, threshold) ? targetX : x
+  }
+}
+
+enum TimelineReorderGeometry {
+  static func insertionIndex(
+    at x: CGFloat,
+    width: CGFloat,
+    clipDurations: [Double]
+  ) -> Int {
+    let totalDuration = clipDurations.reduce(0, +)
+    guard width > 0, totalDuration > 0 else { return 0 }
+    let time = Double(min(max(0, x), width) / width) * totalDuration
+    var start = 0.0
+    for (index, duration) in clipDurations.enumerated() {
+      if time < start + duration / 2 {
+        return index
+      }
+      start += duration
+    }
+    return clipDurations.count
+  }
+
+  static func insertionX(
+    for insertionIndex: Int,
+    width: CGFloat,
+    clipDurations: [Double]
+  ) -> CGFloat {
+    let totalDuration = clipDurations.reduce(0, +)
+    guard width > 0, totalDuration > 0 else { return 0 }
+    let index = min(max(0, insertionIndex), clipDurations.count)
+    let time = clipDurations.prefix(index).reduce(0, +)
+    return width * CGFloat(time / totalDuration)
+  }
+
+  static func destinationIndex(
+    sourceIndex: Int,
+    insertionIndex: Int,
+    clipCount: Int
+  ) -> Int? {
+    guard clipCount > 0, (0..<clipCount).contains(sourceIndex) else {
+      return nil
+    }
+    let insertion = min(max(0, insertionIndex), clipCount)
+    let destination = insertion > sourceIndex ? insertion - 1 : insertion
+    return destination == sourceIndex ? nil : destination
   }
 }
 

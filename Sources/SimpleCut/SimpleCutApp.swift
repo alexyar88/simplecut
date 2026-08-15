@@ -21,7 +21,7 @@ struct SimpleCutApp: App {
     .windowStyle(.hiddenTitleBar)
     .windowResizability(.contentMinSize)
     .commands {
-      SimpleCutCommands(project: project)
+      SimpleCutCommands(project: project, playback: project.playback)
     }
 
     Window("Запись", id: "recording") {
@@ -37,6 +37,7 @@ struct SimpleCutApp: App {
 
 private struct SimpleCutCommands: Commands {
   @ObservedObject var project: EditorProject
+  @ObservedObject var playback: PlaybackState
   @Environment(\.openWindow) private var openWindow
 
   var body: some Commands {

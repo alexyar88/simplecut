@@ -184,10 +184,11 @@ final class EditorProject: ObservableObject {
 
   var canSplitAtPlayhead: Bool {
     guard duration > 0 else { return false }
+    let splitTime = activeSplitTime
     var cursor = 0.0
     for clip in clips {
       let end = cursor + clip.duration
-      if playhead > cursor + 0.04, playhead < end - 0.04 {
+      if splitTime > cursor + 0.04, splitTime < end - 0.04 {
         return true
       }
       cursor = end
@@ -500,6 +501,7 @@ final class EditorProject: ObservableObject {
       overlays[index].fontWeight = source.fontWeight
       overlays[index].textAlignment = source.textAlignment
       overlays[index].foregroundHex = source.foregroundHex
+      overlays[index].backgroundEnabled = source.backgroundEnabled
       overlays[index].backgroundHex = source.backgroundHex
       overlays[index].strokeHex = source.strokeHex
       overlays[index].strokeWidth = source.strokeWidth
@@ -789,6 +791,7 @@ final class EditorProject: ObservableObject {
   }
 
   func splitAtPlayhead() {
+    let splitTime = activeSplitTime
     guard canSplitAtPlayhead else {
       status = "Переместите курсор внутрь фрагмента, чтобы разрезать"
       return
@@ -796,9 +799,9 @@ final class EditorProject: ObservableObject {
     var cursor = 0.0
     for index in clips.indices {
       let end = cursor + clips[index].duration
-      if playhead > cursor + 0.04, playhead < end - 0.04 {
+      if splitTime > cursor + 0.04, splitTime < end - 0.04 {
         recordUndoCheckpoint()
-        let local = playhead - cursor
+        let local = splitTime - cursor
         let original = clips[index]
         let left = VideoClip(
           sourceURL: original.sourceURL,
@@ -819,6 +822,13 @@ final class EditorProject: ObservableObject {
       }
       cursor = end
     }
+  }
+
+  private var activeSplitTime: Double {
+    if playback.isPlaying {
+      return playback.playhead
+    }
+    return playback.timelineSkimmerTime ?? playback.anchoredPlayhead
   }
 
   func joinSelectedClips() {
@@ -1082,18 +1092,27 @@ final class EditorProject: ObservableObject {
 
   func moveClip(id: UUID, before targetID: UUID) {
     guard id != targetID,
-      let sourceIndex = clips.firstIndex(where: { $0.id == id }),
+      clips.contains(where: { $0.id == id }),
       let initialTargetIndex = clips.firstIndex(where: { $0.id == targetID })
     else { return }
+    moveClip(id: id, toInsertionIndex: initialTargetIndex)
+  }
+
+  @discardableResult
+  func moveClip(id: UUID, toInsertionIndex requestedInsertionIndex: Int) -> Bool {
+    guard let sourceIndex = clips.firstIndex(where: { $0.id == id }),
+      let destinationIndex = TimelineReorderGeometry.destinationIndex(
+        sourceIndex: sourceIndex,
+        insertionIndex: requestedInsertionIndex,
+        clipCount: clips.count
+      )
+    else { return false }
     recordUndoCheckpoint()
     let clip = clips.remove(at: sourceIndex)
-    let targetIndex =
-      sourceIndex < initialTargetIndex
-      ? initialTargetIndex - 1
-      : initialTargetIndex
-    clips.insert(clip, at: targetIndex)
-    selectedClipID = id
+    clips.insert(clip, at: destinationIndex)
+    setClipSelection([id], primary: id)
     rebuildAfterEdit()
+    return true
   }
 
   func moveClip(id: UUID, by offset: Int) {

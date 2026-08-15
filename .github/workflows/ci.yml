@@ -1,17 +1,29 @@
-name: CI
+name: CI and Release
 
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - name: Select Xcode
-        run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
+      - uses: actions/checkout@v5
+      - name: Select supported Xcode
+        run: |
+          sudo xcode-select --switch \
+            /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
+          swift --version
       - name: Resolve dependencies
         run: swift package resolve
       - name: Validate app metadata
@@ -20,3 +32,62 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+
+  package-and-release:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: test
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Select supported Xcode
+        run: |
+          sudo xcode-select --switch \
+            /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
+          swift --version
+      - name: Package application
+        run: ./Scripts/package-app.sh
+      - name: Create distribution archive
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            build/SimpleCut.app build/SimpleCut-macOS.zip
+          ./Scripts/create-dmg.sh
+          shasum -a 256 \
+            build/SimpleCut-macOS.dmg \
+            build/SimpleCut-macOS.zip \
+            > build/SHA256SUMS.txt
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleCut-macOS
+          path: |
+            build/SimpleCut-macOS.dmg
+            build/SimpleCut-macOS.zip
+            build/SHA256SUMS.txt
+          if-no-files-found: error
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_tag="build-${GITHUB_RUN_NUMBER}"
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release upload "$release_tag" \
+              build/SimpleCut-macOS.dmg \
+              build/SimpleCut-macOS.zip \
+              build/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create "$release_tag" \
+              build/SimpleCut-macOS.dmg \
+              build/SimpleCut-macOS.zip \
+              build/SHA256SUMS.txt \
+              --target "$GITHUB_SHA" \
+              --title "SimpleCut build ${GITHUB_RUN_NUMBER}" \
+              --generate-notes \
+              --latest
+          fi

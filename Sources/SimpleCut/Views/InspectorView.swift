@@ -330,11 +330,18 @@ struct InspectorView: View {
           selection: captionColorBinding(\.foregroundHex),
           supportsOpacity: true
         )
+        let backgroundEnabled = captionBinding(
+          \.backgroundEnabled,
+          fallback: true,
+          recordsCheckpoint: true
+        )
+        Toggle("Подложка", isOn: backgroundEnabled)
         ColorPicker(
           "Цвет подложки",
           selection: captionColorBinding(\.backgroundHex),
           supportsOpacity: true
         )
+        .disabled(!backgroundEnabled.wrappedValue)
         ColorPicker(
           "Цвет обводки",
           selection: captionColorBinding(\.strokeHex),
@@ -352,12 +359,14 @@ struct InspectorView: View {
           range: 0...40,
           suffix: " pt"
         )
+        .disabled(!backgroundEnabled.wrappedValue)
         inspectorSlider(
           "Скругление",
           value: captionBinding(\.cornerRadius, fallback: 8),
           range: 0...32,
           suffix: " pt"
         )
+        .disabled(!backgroundEnabled.wrappedValue)
         inspectorSlider(
           "Ширина",
           value: captionBinding(\.normalizedWidth, fallback: 0.82),
@@ -479,6 +488,11 @@ struct InspectorView: View {
           ),
           supportsOpacity: true
         )
+        let backgroundEnabled = overlayBinding(
+          index: index,
+          keyPath: \.backgroundEnabled
+        )
+        Toggle("Подложка", isOn: backgroundEnabled)
         ColorPicker(
           "Цвет подложки",
           selection: colorBinding(
@@ -486,6 +500,7 @@ struct InspectorView: View {
           ),
           supportsOpacity: true
         )
+        .disabled(!backgroundEnabled.wrappedValue)
         ColorPicker(
           "Цвет обводки",
           selection: colorBinding(
@@ -505,12 +520,14 @@ struct InspectorView: View {
           range: 0...40,
           suffix: " pt"
         )
+        .disabled(!backgroundEnabled.wrappedValue)
         inspectorSlider(
           "Скругление",
           value: $project.overlays[index].cornerRadius,
           range: 0...32,
           suffix: " pt"
         )
+        .disabled(!backgroundEnabled.wrappedValue)
         transformControls(index: index, minimumWidth: 0.25)
         Divider()
         quickStyleMenu(kind: .text, overlayID: item.id)

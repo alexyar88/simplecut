@@ -18,6 +18,9 @@ struct TimelineView: View {
   @State private var lastSkimmedFrame: Int?
   @State private var hoveredTimelineX: CGFloat?
   @State private var timelineContentMinX: CGFloat = 0
+  @State private var draggedClipID: UUID?
+  @State private var clipDropInsertionIndex: Int?
+  @State private var clipReorderTranslation: CGFloat = 0
   private let maximumTimelineZoom = 64.0
   private let clipGap: CGFloat = 10
   private let playheadSnapDistance: CGFloat = 7
@@ -113,14 +116,21 @@ struct TimelineView: View {
               )
               let clampedX = min(max(0, contentX), contentWidth)
               hoveredTimelineX = clampedX
+              let snappedX = snappedTimelineX(clampedX, width: contentWidth)
+              playback.timelineSkimmerTime = TimelineInteractionGeometry.time(
+                at: snappedX,
+                width: contentWidth,
+                duration: project.duration
+              )
               skimTimeline(
-                at: snappedTimelineX(clampedX, width: contentWidth),
+                at: snappedX,
                 width: contentWidth
               )
             },
             onExited: {
               lastSkimmedFrame = nil
               hoveredTimelineX = nil
+              playback.timelineSkimmerTime = nil
             }
           )
           .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -160,6 +170,9 @@ struct TimelineView: View {
         )
       }
       .frame(height: 180 + CGFloat(overlayKinds.count) * 42)
+      .onDisappear {
+        playback.timelineSkimmerTime = nil
+      }
     }
   }
 
@@ -271,7 +284,11 @@ struct TimelineView: View {
       clipBoundaries(in: size, clipLayout: clipLayout)
     }
     .frame(width: size.width, height: size.height)
+    .coordinateSpace(name: "timelineClipTrack")
     .contentShape(Rectangle())
+    .overlay(alignment: .topLeading) {
+      clipDropIndicator(in: size)
+    }
     .simultaneousGesture(
       SpatialTapGesture(coordinateSpace: .local)
         .onEnded { value in
@@ -345,6 +362,10 @@ struct TimelineView: View {
       trackSize: trackSize
     )
     .foregroundStyle(.white)
+    // Constrain the live trim preview before applying its background and mask.
+    // Otherwise the original-width thumbnail can render past the dragged edge
+    // and cover the next clip until the edit is committed.
+    .frame(width: width, height: trackSize.height - 4)
     .background(
       Color(nsColor: .controlAccentColor).opacity(isSelected ? 0.38 : 0.24),
       in: RoundedRectangle(cornerRadius: 9)
@@ -365,9 +386,17 @@ struct TimelineView: View {
       reduceMotion ? nil : EditorTheme.quickAnimation,
       value: isSelected
     )
-    .frame(width: width, height: trackSize.height - 4)
     .contentShape(Rectangle())
-    .offset(x: offset)
+    .offset(
+      x: offset + (draggedClipID == clip.id ? clipReorderTranslation : 0)
+    )
+    .scaleEffect(draggedClipID == clip.id ? 1.015 : 1)
+    .opacity(draggedClipID == clip.id ? 0.9 : 1)
+    .zIndex(draggedClipID == clip.id ? 10 : 0)
+    .animation(
+      reduceMotion ? nil : EditorTheme.quickAnimation,
+      value: draggedClipID
+    )
     .onHover { isHovered in
       if isHovered {
         hoveredClipID = clip.id
@@ -378,6 +407,8 @@ struct TimelineView: View {
     .contextMenu {
       clipContextMenu(clip: clip, index: index, start: start)
     }
+    .gesture(clipReorderGesture(for: clip, trackSize: trackSize))
+    .help("Нажмите, чтобы выбрать · перетащите, чтобы изменить порядок")
     .accessibilityElement(children: .ignore)
     .accessibilityIdentifier("timeline-clip-\(index + 1)")
     .accessibilityLabel("Фрагмент \(index + 1)")
@@ -397,6 +428,95 @@ struct TimelineView: View {
     .accessibilityAction(named: "Переместить вправо") {
       project.moveClip(id: clip.id, by: 1)
     }
+  }
+
+  @ViewBuilder
+  private func clipDropIndicator(in size: CGSize) -> some View {
+    if let draggedClipID,
+      let sourceIndex = project.clips.firstIndex(where: {
+        $0.id == draggedClipID
+      }),
+      let insertionIndex = clipDropInsertionIndex,
+      TimelineReorderGeometry.destinationIndex(
+        sourceIndex: sourceIndex,
+        insertionIndex: insertionIndex,
+        clipCount: project.clips.count
+      ) != nil
+    {
+      let x = TimelineReorderGeometry.insertionX(
+        for: insertionIndex,
+        width: size.width,
+        clipDurations: project.clips.map(\.duration)
+      )
+      ZStack(alignment: .top) {
+        Rectangle()
+          .fill(EditorTheme.selection)
+          .frame(width: 3, height: size.height)
+          .shadow(color: EditorTheme.selection.opacity(0.8), radius: 3)
+        Image(systemName: "arrowtriangle.down.fill")
+          .font(.system(size: 9, weight: .bold))
+          .foregroundStyle(EditorTheme.selection)
+          .offset(y: -2)
+      }
+      .frame(width: 9, height: size.height)
+      .offset(x: min(max(0, x - 4.5), max(0, size.width - 9)))
+      .allowsHitTesting(false)
+      .accessibilityHidden(true)
+    }
+  }
+
+  private func clipReorderGesture(
+    for clip: VideoClip,
+    trackSize: CGSize
+  ) -> some Gesture {
+    DragGesture(
+      minimumDistance: 5,
+      coordinateSpace: .named("timelineClipTrack")
+    )
+    .onChanged { value in
+      guard !isTrimming else { return }
+      if draggedClipID == nil {
+        project.selectClip(id: clip.id)
+        draggedClipID = clip.id
+      }
+      guard draggedClipID == clip.id else { return }
+      clipReorderTranslation = value.translation.width
+      let isNearTrack = value.location.y >= -36
+        && value.location.y <= trackSize.height + 36
+      clipDropInsertionIndex = isNearTrack
+        ? TimelineReorderGeometry.insertionIndex(
+          at: value.location.x,
+          width: trackSize.width,
+          clipDurations: project.clips.map(\.duration)
+        )
+        : nil
+    }
+    .onEnded { value in
+      guard draggedClipID == clip.id else { return }
+      let insertionIndex = clipDropInsertionIndex
+        ?? ((value.location.y >= -36
+          && value.location.y <= trackSize.height + 36)
+          ? TimelineReorderGeometry.insertionIndex(
+            at: value.location.x,
+            width: trackSize.width,
+            clipDurations: project.clips.map(\.duration)
+          )
+          : nil)
+      resetClipReorderGesture()
+      guard let insertionIndex else { return }
+      _ = withAnimation(reduceMotion ? nil : EditorTheme.softAnimation) {
+        project.moveClip(
+          id: clip.id,
+          toInsertionIndex: insertionIndex
+        )
+      }
+    }
+  }
+
+  private func resetClipReorderGesture() {
+    draggedClipID = nil
+    clipDropInsertionIndex = nil
+    clipReorderTranslation = 0
   }
 
   @ViewBuilder

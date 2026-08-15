@@ -42,6 +42,50 @@ final class ProjectModelsTests: XCTestCase {
     )
   }
 
+  func testTimelineReorderGeometryUsesClipMidpointsAndIgnoresNoOpDrops() {
+    let durations = [2.0, 4.0, 1.0]
+
+    XCTAssertEqual(
+      TimelineReorderGeometry.insertionIndex(
+        at: 5,
+        width: 700,
+        clipDurations: durations
+      ),
+      0
+    )
+    XCTAssertEqual(
+      TimelineReorderGeometry.insertionIndex(
+        at: 300,
+        width: 700,
+        clipDurations: durations
+      ),
+      1
+    )
+    XCTAssertEqual(
+      TimelineReorderGeometry.insertionIndex(
+        at: 690,
+        width: 700,
+        clipDurations: durations
+      ),
+      3
+    )
+    XCTAssertNil(
+      TimelineReorderGeometry.destinationIndex(
+        sourceIndex: 1,
+        insertionIndex: 2,
+        clipCount: 3
+      )
+    )
+    XCTAssertEqual(
+      TimelineReorderGeometry.destinationIndex(
+        sourceIndex: 0,
+        insertionIndex: 3,
+        clipCount: 3
+      ),
+      2
+    )
+  }
+
   @MainActor
   func testSkimmingKeepsAnchoredPlayheadUntilPositionIsCommitted() {
     let project = EditorProject(loadRecovery: false)
@@ -404,6 +448,26 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertEqual(item.strokeWidth, 0)
     XCTAssertEqual(item.textPadding, 12)
     XCTAssertEqual(item.cornerRadius, 8)
+    XCTAssertTrue(item.backgroundEnabled)
+  }
+
+  func testLegacyTransparentBackgroundIsMigratedAsDisabled() throws {
+    let json = """
+      {
+        "kind": "text",
+        "startTime": 0,
+        "duration": 1,
+        "text": "Без подложки",
+        "backgroundHex": "#00000000"
+      }
+      """
+
+    let item = try JSONDecoder().decode(
+      OverlayItem.self,
+      from: Data(json.utf8)
+    )
+
+    XCTAssertFalse(item.backgroundEnabled)
   }
 
   func testCaptionGeneratorSplitsLongTextAndKeepsTiming() {
@@ -554,6 +618,43 @@ final class ProjectModelsTests: XCTestCase {
   }
 
   @MainActor
+  func testSplitUsesAnchoredPlayheadWhenSkimmerIsNotVisible() {
+    let project = EditorProject(loadRecovery: false)
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 6
+      )
+    ]
+
+    project.seek(to: 2)
+    project.scrub(to: 4)
+    project.playback.timelineSkimmerTime = nil
+    project.splitAtPlayhead()
+
+    XCTAssertEqual(project.clips.map(\.duration), [2, 4])
+  }
+
+  @MainActor
+  func testSplitPrefersVisibleTimelineSkimmer() {
+    let project = EditorProject(loadRecovery: false)
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 6
+      )
+    ]
+
+    project.seek(to: 2)
+    project.playback.timelineSkimmerTime = 4
+    project.splitAtPlayhead()
+
+    XCTAssertEqual(project.clips.map(\.duration), [4, 2])
+  }
+
+  @MainActor
   func testJoiningSelectedSplitClipsRestoresSingleClip() {
     let project = EditorProject(loadRecovery: false)
     let source = URL(fileURLWithPath: "/tmp/source.mov")
@@ -629,6 +730,49 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertEqual(project.clips[1].sourceStart, 1)
     XCTAssertEqual(project.duration, 6)
     XCTAssertEqual(project.clips[0].sourceEnd, project.clips[1].sourceStart)
+  }
+
+  @MainActor
+  func testClipCanMoveToTimelineInsertionPointAndUndoAsOneEdit() {
+    let project = EditorProject(loadRecovery: false)
+    let clips = (0..<3).map { index in
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/reorder-\(index).mov"),
+        sourceStart: 0,
+        duration: Double(index + 1)
+      )
+    }
+    project.clips = clips
+
+    XCTAssertTrue(
+      project.moveClip(id: clips[0].id, toInsertionIndex: clips.count)
+    )
+    XCTAssertEqual(
+      project.clips.map(\.id),
+      [clips[1].id, clips[2].id, clips[0].id]
+    )
+    XCTAssertEqual(project.selectedClipIDs, [clips[0].id])
+
+    project.undo()
+
+    XCTAssertEqual(project.clips.map(\.id), clips.map(\.id))
+  }
+
+  @MainActor
+  func testDroppingClipAtItsCurrentBoundaryDoesNotCreateUndoStep() {
+    let project = EditorProject(loadRecovery: false)
+    let clips = (0..<2).map { index in
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/noop-reorder-\(index).mov"),
+        sourceStart: 0,
+        duration: 1
+      )
+    }
+    project.clips = clips
+
+    XCTAssertFalse(project.moveClip(id: clips[0].id, toInsertionIndex: 1))
+    XCTAssertEqual(project.clips.map(\.id), clips.map(\.id))
+    XCTAssertFalse(project.canUndo)
   }
 
   @MainActor
@@ -980,6 +1124,7 @@ final class ProjectModelsTests: XCTestCase {
     project.overlays[0].fontSize = 88
     project.overlays[0].strokeHex = "#FF00FFFF"
     project.overlays[0].strokeWidth = 6
+    project.overlays[0].backgroundEnabled = false
     project.overlays[0].textPadding = 21
     project.overlays[0].cornerRadius = 14
     project.overlays[0].normalizedWidth = 0.73
@@ -997,6 +1142,7 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertEqual(project.overlays[0].fontSize, 88)
     XCTAssertEqual(project.overlays[0].strokeHex, "#FF00FFFF")
     XCTAssertEqual(project.overlays[0].strokeWidth, 6)
+    XCTAssertFalse(project.overlays[0].backgroundEnabled)
     XCTAssertEqual(project.overlays[0].textPadding, 21)
     XCTAssertEqual(project.overlays[0].cornerRadius, 14)
     XCTAssertEqual(project.overlays[0].normalizedWidth, 0.73)
@@ -1034,6 +1180,34 @@ final class ProjectModelsTests: XCTestCase {
     )
     XCTAssertEqual(multiline.text, "Первая строка\nВторая строка\nТретья строка")
     XCTAssertEqual(multiline.textAlignment, .right)
+  }
+
+  @MainActor
+  func testDisabledBackgroundRemovesItsPaddingFromRender() {
+    let withBackground = OverlayItem(
+      kind: .text,
+      startTime: 0,
+      duration: 1,
+      text: "Текст",
+      backgroundEnabled: true,
+      textPadding: 30
+    )
+    var withoutBackground = withBackground
+    withoutBackground.backgroundEnabled = false
+
+    let renderedWithBackground = CaptionRenderer.render(
+      item: withBackground,
+      canvasSize: CGSize(width: 1_080, height: 1_920)
+    )
+    let renderedWithoutBackground = CaptionRenderer.render(
+      item: withoutBackground,
+      canvasSize: CGSize(width: 1_080, height: 1_920)
+    )
+
+    XCTAssertGreaterThan(
+      try! XCTUnwrap(renderedWithBackground).size.height,
+      try! XCTUnwrap(renderedWithoutBackground).size.height
+    )
   }
 
   func testLegacyCaptionStyleDefaultsToCenteredAlignment() throws {

@@ -280,15 +280,7 @@ struct EditorView: View {
       }
 
       Divider().frame(height: 22)
-      Button {
-        project.splitAtPlayhead()
-      } label: {
-        Image(systemName: "scissors")
-      }
-      .buttonStyle(EditorIconButtonStyle())
-      .disabled(!project.canSplitAtPlayhead)
-      .help("Разрезать по позиции курсора (⌘B)")
-      .accessibilityLabel("Разрезать по позиции курсора")
+      SplitAtCursorButton(project: project, playback: project.playback)
       Button {
         project.joinSelectedClips()
       } label: {
@@ -635,6 +627,23 @@ struct EditorView: View {
   private func safeProjectName(fallback: String) -> String {
     let trimmed = project.name.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? fallback : trimmed
+  }
+}
+
+private struct SplitAtCursorButton: View {
+  @ObservedObject var project: EditorProject
+  @ObservedObject var playback: PlaybackState
+
+  var body: some View {
+    Button {
+      project.splitAtPlayhead()
+    } label: {
+      Image(systemName: "scissors")
+    }
+    .buttonStyle(EditorIconButtonStyle())
+    .disabled(!project.canSplitAtPlayhead)
+    .help("Разрезать по позиции курсора (⌘B)")
+    .accessibilityLabel("Разрезать по позиции курсора")
   }
 }
 

@@ -61,7 +61,10 @@ enum CaptionRenderer {
       attributes: attributes
     )
     let width = max(1, canvasSize.width * item.normalizedWidth)
-    let inset = max(0, item.textPadding * scale) + stroke
+    let backgroundInset = item.backgroundEnabled
+      ? max(0, item.textPadding * scale)
+      : 0
+    let inset = backgroundInset + stroke
     let textWidth = max(1, width - inset * 2)
     let measured = attributed.boundingRect(
       with: CGSize(
@@ -104,12 +107,14 @@ enum CaptionRenderer {
     )
     NSColor.clear.setFill()
     bounds.fill(using: .copy)
-    NSColor(hex: item.backgroundHex).setFill()
-    NSBezierPath(
-      roundedRect: bounds,
-      xRadius: max(0, item.cornerRadius * scale),
-      yRadius: max(0, item.cornerRadius * scale)
-    ).fill()
+    if item.backgroundEnabled {
+      NSColor(hex: item.backgroundHex).setFill()
+      NSBezierPath(
+        roundedRect: bounds,
+        xRadius: max(0, item.cornerRadius * scale),
+        yRadius: max(0, item.cornerRadius * scale)
+      ).fill()
+    }
     attributed.draw(
       with: CGRect(
         x: inset,
@@ -146,6 +151,7 @@ enum CaptionRenderer {
       item.fontWeight.rawValue,
       item.textAlignment.rawValue,
       item.foregroundHex,
+      String(item.backgroundEnabled),
       item.backgroundHex,
       item.strokeHex,
       String(item.fontSize),
