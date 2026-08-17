@@ -16,7 +16,9 @@ struct TimelineView: View {
   @State private var overlayDragOffset: CGFloat = 0
   @State private var hoveredClipID: UUID?
   @State private var lastSkimmedFrame: Int?
-  @State private var hoveredTimelineX: CGFloat?
+  // Keep the pointer in viewport coordinates. Content coordinates change when
+  // the scroll view zooms or scrolls, even if the mouse itself does not move.
+  @State private var hoveredTimelineViewportX: CGFloat?
   @State private var timelineContentMinX: CGFloat = 0
   @State private var draggedClipID: UUID?
   @State private var clipDropInsertionIndex: Int?
@@ -69,6 +71,13 @@ struct TimelineView: View {
           viewport.size.width,
           viewport.size.width * project.timelineZoom
         )
+        let hoveredContentX = hoveredTimelineViewportX.map {
+          timelineContentX(
+            viewportX: $0,
+            contentMinX: timelineContentMinX,
+            contentWidth: contentWidth
+          )
+        }
         ScrollView(.horizontal) {
           VStack(spacing: 8) {
             timelineTickRuler(width: contentWidth)
@@ -97,7 +106,7 @@ struct TimelineView: View {
               playback: playback,
               duration: project.duration,
               contentWidth: contentWidth,
-              hoveredX: hoveredTimelineX,
+              hoveredX: hoveredContentX,
               snapDistance: playheadSnapDistance
             )
           }
@@ -106,30 +115,27 @@ struct TimelineView: View {
         .scrollIndicators(.visible)
         .onPreferenceChange(TimelineContentMinXPreferenceKey.self) { minX in
           timelineContentMinX = minX
+          if let viewportX = hoveredTimelineViewportX {
+            updateTimelinePointer(
+              viewportX: viewportX,
+              contentMinX: minX,
+              contentWidth: contentWidth
+            )
+          }
         }
         .overlay {
           TimelinePointerTrackingView(
             onMoved: { viewportX in
-              let contentX = TimelineInteractionGeometry.contentX(
+              hoveredTimelineViewportX = viewportX
+              updateTimelinePointer(
                 viewportX: viewportX,
-                contentMinX: timelineContentMinX
-              )
-              let clampedX = min(max(0, contentX), contentWidth)
-              hoveredTimelineX = clampedX
-              let snappedX = snappedTimelineX(clampedX, width: contentWidth)
-              playback.timelineSkimmerTime = TimelineInteractionGeometry.time(
-                at: snappedX,
-                width: contentWidth,
-                duration: project.duration
-              )
-              skimTimeline(
-                at: snappedX,
-                width: contentWidth
+                contentMinX: timelineContentMinX,
+                contentWidth: contentWidth
               )
             },
             onExited: {
               lastSkimmedFrame = nil
-              hoveredTimelineX = nil
+              hoveredTimelineViewportX = nil
               playback.timelineSkimmerTime = nil
             }
           )
@@ -168,6 +174,15 @@ struct TimelineView: View {
               zoomAtMagnificationStart = nil
             }
         )
+        .onChange(of: project.timelineZoom) {
+          if let viewportX = hoveredTimelineViewportX {
+            updateTimelinePointer(
+              viewportX: viewportX,
+              contentMinX: timelineContentMinX,
+              contentWidth: contentWidth
+            )
+          }
+        }
       }
       .frame(height: 180 + CGFloat(overlayKinds.count) * 42)
       .onDisappear {
@@ -604,6 +619,37 @@ struct TimelineView: View {
       ? playback.anchoredPlayhead
       : min(project.duration, Double(frame) / 30)
     project.scrub(to: scrubTime)
+  }
+
+  private func updateTimelinePointer(
+    viewportX: CGFloat,
+    contentMinX: CGFloat,
+    contentWidth: CGFloat
+  ) {
+    let contentX = timelineContentX(
+      viewportX: viewportX,
+      contentMinX: contentMinX,
+      contentWidth: contentWidth
+    )
+    let snappedX = snappedTimelineX(contentX, width: contentWidth)
+    playback.timelineSkimmerTime = TimelineInteractionGeometry.time(
+      at: snappedX,
+      width: contentWidth,
+      duration: project.duration
+    )
+    skimTimeline(at: snappedX, width: contentWidth)
+  }
+
+  private func timelineContentX(
+    viewportX: CGFloat,
+    contentMinX: CGFloat,
+    contentWidth: CGFloat
+  ) -> CGFloat {
+    let contentX = TimelineInteractionGeometry.contentX(
+      viewportX: viewportX,
+      contentMinX: contentMinX
+    )
+    return min(max(0, contentX), contentWidth)
   }
 
   private func snappedTimelineX(_ x: CGFloat, width: CGFloat) -> CGFloat {
