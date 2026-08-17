@@ -874,50 +874,40 @@ struct TimelineView: View {
     edge: TrimEdge,
     pixelsPerSecond: Double
   ) -> some View {
-    Color.clear
-      .frame(width: 12)
-      .contentShape(Rectangle().inset(by: -3))
-      .highPriorityGesture(
-        DragGesture(coordinateSpace: .global)
-          .onChanged { value in
-            if !isTrimming {
-              project.selectClip(id: clip.id)
-              isTrimming = true
-              activeTrimClipID = clip.id
-              activeTrimEdge = edge
-              trimPixelsPerSecondAtStart = pixelsPerSecond
-            }
-            // Keep the ripple timeline unchanged while the pointer is down.
-            // This moves the grabbed edge itself and exposes a temporary gap.
-            trimDragOffset = value.translation.width
-          }
-          .onEnded { value in
-            let initialPixelsPerSecond =
-              trimPixelsPerSecondAtStart ?? pixelsPerSecond
-            let deltaSeconds = value.translation.width
-              / max(initialPixelsPerSecond, 0.01)
-            isTrimming = false
-            activeTrimClipID = nil
-            activeTrimEdge = nil
-            trimDragOffset = 0
-            trimPixelsPerSecondAtStart = nil
-            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.12)) {
-              project.resizeClip(
-                id: clip.id,
-                edge: edge,
-                by: deltaSeconds
-              )
-            }
-          }
-      )
-      .onContinuousHover { phase in
-        switch phase {
-        case .active:
-          NSCursor.resizeLeftRight.set()
-        case .ended:
-          NSCursor.arrow.set()
+    TimelineTrimHandleView(
+      onDragChanged: { translation in
+        if !isTrimming {
+          project.selectClip(id: clip.id)
+          isTrimming = true
+          activeTrimClipID = clip.id
+          activeTrimEdge = edge
+          trimPixelsPerSecondAtStart = pixelsPerSecond
+        }
+        // Keep the ripple timeline unchanged while the pointer is down.
+        // This moves the grabbed edge itself and exposes a temporary gap.
+        trimDragOffset = translation
+      },
+      onDragEnded: { translation in
+        let initialPixelsPerSecond =
+          trimPixelsPerSecondAtStart ?? pixelsPerSecond
+        let deltaSeconds = translation
+          / max(initialPixelsPerSecond, 0.01)
+        isTrimming = false
+        activeTrimClipID = nil
+        activeTrimEdge = nil
+        trimDragOffset = 0
+        trimPixelsPerSecondAtStart = nil
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.12)) {
+          project.resizeClip(
+            id: clip.id,
+            edge: edge,
+            by: deltaSeconds
+          )
         }
       }
+    )
+      .frame(width: 12)
+      .frame(maxHeight: .infinity)
       .help(
         edge == .leading
           ? "Потяните край: вправо — обрезать, влево — вернуть исходник"
@@ -1455,6 +1445,12 @@ private struct TimelinePointerTrackingView: NSViewRepresentable {
   ) {
     nsView.onMoved = onMoved
     nsView.onExited = onExited
+    // Zooming and rebuilding clips can move the view underneath a stationary
+    // pointer without producing mouseMoved/mouseExited. Reconcile against the
+    // window's actual pointer position after SwiftUI finishes this update.
+    DispatchQueue.main.async { [weak nsView] in
+      nsView?.refreshPointerLocation()
+    }
   }
 }
 
@@ -1462,6 +1458,8 @@ private final class TimelinePointerTrackingNSView: NSView {
   var onMoved: ((CGFloat) -> Void)?
   var onExited: (() -> Void)?
   private var pointerTrackingArea: NSTrackingArea?
+  private var lastPointerLocation: NSPoint?
+  private var isPointerInside = false
 
   override func updateTrackingAreas() {
     super.updateTrackingAreas()
@@ -1481,6 +1479,7 @@ private final class TimelinePointerTrackingNSView: NSView {
     )
     addTrackingArea(trackingArea)
     pointerTrackingArea = trackingArea
+    refreshPointerLocation()
   }
 
   override func mouseEntered(with event: NSEvent) {
@@ -1492,7 +1491,7 @@ private final class TimelinePointerTrackingNSView: NSView {
   }
 
   override func mouseExited(with event: NSEvent) {
-    onExited?()
+    reportPointerExit()
   }
 
   override func hitTest(_ point: NSPoint) -> NSView? {
@@ -1501,7 +1500,131 @@ private final class TimelinePointerTrackingNSView: NSView {
 
   private func reportPointerLocation(from event: NSEvent) {
     let location = convert(event.locationInWindow, from: nil)
-    onMoved?(min(max(0, location.x), bounds.width))
+    reportPointerLocation(location)
+  }
+
+  func refreshPointerLocation() {
+    guard let window else {
+      reportPointerExit()
+      return
+    }
+    let location = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+    guard bounds.contains(location) else {
+      reportPointerExit()
+      return
+    }
+    reportPointerLocation(location)
+  }
+
+  private func reportPointerLocation(_ location: NSPoint) {
+    let x = min(max(0, location.x), bounds.width)
+    let didMove = lastPointerLocation.map {
+      abs($0.x - location.x) > 0.1 || abs($0.y - location.y) > 0.1
+    } ?? true
+    lastPointerLocation = location
+    guard !isPointerInside || didMove else { return }
+    isPointerInside = true
+    onMoved?(x)
+  }
+
+  private func reportPointerExit() {
+    lastPointerLocation = nil
+    guard isPointerInside else { return }
+    isPointerInside = false
+    onExited?()
+  }
+}
+
+/// Owns both pointer input and its cursor rectangle in AppKit. A split replaces
+/// one instance with two fresh instances, so the new edges work immediately
+/// without waiting for SwiftUI to rebuild hover state.
+private struct TimelineTrimHandleView: NSViewRepresentable {
+  let onDragChanged: (CGFloat) -> Void
+  let onDragEnded: (CGFloat) -> Void
+
+  func makeNSView(context: Context) -> TimelineTrimHandleNSView {
+    let view = TimelineTrimHandleNSView()
+    view.onDragChanged = onDragChanged
+    view.onDragEnded = onDragEnded
+    return view
+  }
+
+  func updateNSView(
+    _ nsView: TimelineTrimHandleNSView,
+    context: Context
+  ) {
+    nsView.onDragChanged = onDragChanged
+    nsView.onDragEnded = onDragEnded
+    nsView.window?.invalidateCursorRects(for: nsView)
+  }
+}
+
+private final class TimelineTrimHandleNSView: NSView {
+  var onDragChanged: ((CGFloat) -> Void)?
+  var onDragEnded: ((CGFloat) -> Void)?
+  private var dragStartX: CGFloat?
+  private var cursorTrackingArea: NSTrackingArea?
+
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas()
+    if let cursorTrackingArea {
+      removeTrackingArea(cursorTrackingArea)
+    }
+    let trackingArea = NSTrackingArea(
+      rect: .zero,
+      options: [
+        .mouseEnteredAndExited,
+        .mouseMoved,
+        .activeInKeyWindow,
+        .inVisibleRect,
+      ],
+      owner: self,
+      userInfo: nil
+    )
+    addTrackingArea(trackingArea)
+    cursorTrackingArea = trackingArea
+    refreshCursor()
+  }
+
+  override func resetCursorRects() {
+    super.resetCursorRects()
+    addCursorRect(bounds, cursor: .resizeLeftRight)
+  }
+
+  override func mouseEntered(with event: NSEvent) {
+    NSCursor.resizeLeftRight.set()
+  }
+
+  override func mouseMoved(with event: NSEvent) {
+    NSCursor.resizeLeftRight.set()
+  }
+
+  override func mouseExited(with event: NSEvent) {
+    NSCursor.arrow.set()
+  }
+
+  override func mouseDown(with event: NSEvent) {
+    dragStartX = event.locationInWindow.x
+  }
+
+  override func mouseDragged(with event: NSEvent) {
+    guard let dragStartX else { return }
+    onDragChanged?(event.locationInWindow.x - dragStartX)
+  }
+
+  override func mouseUp(with event: NSEvent) {
+    guard let dragStartX else { return }
+    self.dragStartX = nil
+    onDragEnded?(event.locationInWindow.x - dragStartX)
+    refreshCursor()
+  }
+
+  private func refreshCursor() {
+    guard let window else { return }
+    let location = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+    if bounds.contains(location) {
+      NSCursor.resizeLeftRight.set()
+    }
   }
 }
 
