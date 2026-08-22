@@ -313,24 +313,31 @@ final class EditorUISmokeTests: XCTestCase {
         ).first
       )
       let expectedX = tracker.bounds.width * 0.63
+      func pointerEvent(at x: CGFloat) -> NSEvent {
+        let windowPoint = tracker.convert(
+          NSPoint(x: x, y: tracker.bounds.midY),
+          to: nil
+        )
+        return NSEvent.mouseEvent(
+          with: .mouseMoved,
+          location: windowPoint,
+          modifierFlags: [],
+          timestamp: 0,
+          windowNumber: window.windowNumber,
+          context: nil,
+          eventNumber: 1,
+          clickCount: 0,
+          pressure: 0
+        )!
+      }
+
+      // The representable may survive a split on one SwiftUI version and be
+      // recreated on another. Move away first so this probe never depends on
+      // whether the view retained its duplicate-event suppression state.
+      tracker.mouseMoved(with: pointerEvent(at: expectedX - 10))
       var reportedX: CGFloat?
       tracker.onMoved = { reportedX = $0 }
-      let windowPoint = tracker.convert(
-        NSPoint(x: expectedX, y: tracker.bounds.midY),
-        to: nil
-      )
-      let event = NSEvent.mouseEvent(
-        with: .mouseMoved,
-        location: windowPoint,
-        modifierFlags: [],
-        timestamp: 0,
-        windowNumber: window.windowNumber,
-        context: nil,
-        eventNumber: 1,
-        clickCount: 0,
-        pressure: 0
-      )!
-      tracker.mouseMoved(with: event)
+      tracker.mouseMoved(with: pointerEvent(at: expectedX))
       XCTAssertEqual(reportedX ?? -1, expectedX, accuracy: 0.5, stage)
       XCTAssertEqual(
         TimelineInteractionGeometry.viewportSkimmerX(
