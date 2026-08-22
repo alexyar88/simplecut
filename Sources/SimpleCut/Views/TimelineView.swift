@@ -473,6 +473,87 @@ struct TimelineView: View {
     offset: CGFloat,
     trackSize: CGSize
   ) -> some View {
+    interactiveClip(
+      clip: clip,
+      index: index,
+      start: start,
+      width: width,
+      thumbnailWidth: thumbnailWidth,
+      offset: offset,
+      trackSize: trackSize
+    )
+    .accessibilityElement(children: .ignore)
+    .accessibilityIdentifier("timeline-clip-\(index + 1)")
+    .accessibilityLabel("Фрагмент \(index + 1)")
+    .accessibilityValue(
+      "\(start.timestamp)–\((start + clip.duration).timestamp)"
+    )
+    .accessibilityAddTraits(.isButton)
+    .accessibilityAction {
+      project.selectClip(id: clip.id)
+    }
+    .accessibilityAction(named: "Разрезать посередине") {
+      splitClipInMiddle(clip, start: start)
+    }
+    .accessibilityAction(named: "Переместить влево") {
+      project.moveClip(id: clip.id, by: -1)
+    }
+    .accessibilityAction(named: "Переместить вправо") {
+      project.moveClip(id: clip.id, by: 1)
+    }
+  }
+
+  private func interactiveClip(
+    clip: VideoClip,
+    index: Int,
+    start: Double,
+    width: CGFloat,
+    thumbnailWidth: CGFloat,
+    offset: CGFloat,
+    trackSize: CGSize
+  ) -> some View {
+    decoratedClip(
+      clip: clip,
+      index: index,
+      width: width,
+      thumbnailWidth: thumbnailWidth,
+      trackSize: trackSize
+    )
+    .contentShape(Rectangle())
+    .offset(
+      x: offset + (draggedClipID == clip.id ? clipReorderTranslation : 0)
+    )
+    .scaleEffect(draggedClipID == clip.id ? 1.015 : 1)
+    .opacity(draggedClipID == clip.id ? 0.9 : 1)
+    .zIndex(draggedClipID == clip.id ? 10 : 0)
+    .animation(
+      reduceMotion ? nil : EditorTheme.quickAnimation,
+      value: draggedClipID
+    )
+    .onHover { isHovered in
+      if isHovered {
+        hoveredClipID = clip.id
+      } else if hoveredClipID == clip.id {
+        hoveredClipID = nil
+      }
+    }
+    .contextMenu {
+      clipContextMenu(clip: clip, index: index, start: start)
+    }
+    .gesture(clipReorderGesture(for: clip, trackSize: trackSize))
+    .help(
+      "Фрагмент \(index + 1) · \(clip.duration.timestamp)\n"
+        + "Нажмите, чтобы выбрать · перетащите, чтобы изменить порядок"
+    )
+  }
+
+  private func decoratedClip(
+    clip: VideoClip,
+    index: Int,
+    width: CGFloat,
+    thumbnailWidth: CGFloat,
+    trackSize: CGSize
+  ) -> some View {
     let isSelected = project.isClipSelected(clip.id)
     let pixelsPerSecond = trackSize.width / max(project.duration, 0.01)
     let gapInset = clipGap / 2
@@ -488,30 +569,13 @@ struct TimelineView: View {
       )
     let shadowColor =
       isSelected ? EditorTheme.accent.opacity(0.34) : .black.opacity(0.28)
-    return clipCard(
+    return baseClipCard(
       clip: clip,
       index: index,
       width: width,
       thumbnailWidth: thumbnailWidth,
       trackSize: trackSize
     )
-    .foregroundStyle(.white)
-    // Constrain the live trim preview before applying its background and mask.
-    // Otherwise the original-width thumbnail can render past the dragged edge
-    // and cover the next clip until the edit is committed.
-    // The live trim changes the outer frame. Pinning the clip content to its
-    // leading edge is essential: the default centered alignment makes the
-    // thumbnail strip drift by half of every trim translation.
-    .frame(
-      width: width,
-      height: trackSize.height - 4,
-      alignment: .leading
-    )
-    .background(
-      EditorTheme.accent.opacity(isSelected ? 0.38 : 0.24),
-      in: RoundedRectangle(cornerRadius: clipCornerRadius)
-    )
-    .clipShape(RoundedRectangle(cornerRadius: clipCornerRadius))
     // Adjacent trim hit regions meet at the logical edit point. There is no
     // arrow-cursor dead zone between the two resize cursors at a split.
     .overlay {
@@ -557,51 +621,39 @@ struct TimelineView: View {
       reduceMotion ? nil : EditorTheme.quickAnimation,
       value: isSelected
     )
-    .contentShape(Rectangle())
-    .offset(
-      x: offset + (draggedClipID == clip.id ? clipReorderTranslation : 0)
+  }
+
+  private func baseClipCard(
+    clip: VideoClip,
+    index: Int,
+    width: CGFloat,
+    thumbnailWidth: CGFloat,
+    trackSize: CGSize
+  ) -> some View {
+    clipCard(
+      clip: clip,
+      index: index,
+      width: width,
+      thumbnailWidth: thumbnailWidth,
+      trackSize: trackSize
     )
-    .scaleEffect(draggedClipID == clip.id ? 1.015 : 1)
-    .opacity(draggedClipID == clip.id ? 0.9 : 1)
-    .zIndex(draggedClipID == clip.id ? 10 : 0)
-    .animation(
-      reduceMotion ? nil : EditorTheme.quickAnimation,
-      value: draggedClipID
+    .foregroundStyle(.white)
+    // Constrain the live trim preview before applying its background and mask.
+    // Otherwise the original-width thumbnail can render past the dragged edge
+    // and cover the next clip until the edit is committed. Pin the content to
+    // its leading edge so the strip does not drift during a live trim.
+    .frame(
+      width: width,
+      height: trackSize.height - 4,
+      alignment: .leading
     )
-    .onHover { isHovered in
-      if isHovered {
-        hoveredClipID = clip.id
-      } else if hoveredClipID == clip.id {
-        hoveredClipID = nil
-      }
-    }
-    .contextMenu {
-      clipContextMenu(clip: clip, index: index, start: start)
-    }
-    .gesture(clipReorderGesture(for: clip, trackSize: trackSize))
-    .help(
-      "Фрагмент \(index + 1) · \(clip.duration.timestamp)\n"
-        + "Нажмите, чтобы выбрать · перетащите, чтобы изменить порядок"
+    .background(
+      EditorTheme.accent.opacity(
+        project.isClipSelected(clip.id) ? 0.38 : 0.24
+      ),
+      in: RoundedRectangle(cornerRadius: clipCornerRadius)
     )
-    .accessibilityElement(children: .ignore)
-    .accessibilityIdentifier("timeline-clip-\(index + 1)")
-    .accessibilityLabel("Фрагмент \(index + 1)")
-    .accessibilityValue(
-      "\(start.timestamp)–\((start + clip.duration).timestamp)"
-    )
-    .accessibilityAddTraits(.isButton)
-    .accessibilityAction {
-      project.selectClip(id: clip.id)
-    }
-    .accessibilityAction(named: "Разрезать посередине") {
-      splitClipInMiddle(clip, start: start)
-    }
-    .accessibilityAction(named: "Переместить влево") {
-      project.moveClip(id: clip.id, by: -1)
-    }
-    .accessibilityAction(named: "Переместить вправо") {
-      project.moveClip(id: clip.id, by: 1)
-    }
+    .clipShape(RoundedRectangle(cornerRadius: clipCornerRadius))
   }
 
   @ViewBuilder
