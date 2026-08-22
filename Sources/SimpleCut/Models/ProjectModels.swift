@@ -487,6 +487,8 @@ struct CaptionStyle: Codable, Equatable {
   var normalizedX = 0.5
   var normalizedY = 0.84
   var normalizedWidth = 0.82
+  var rotation = 0.0
+  var opacity = 1.0
   var fontSize = 58.0
   var fontName = "Helvetica Neue"
   var fontWeight = CaptionFontWeight.semibold
@@ -500,7 +502,8 @@ struct CaptionStyle: Codable, Equatable {
   var cornerRadius = 8.0
 
   enum CodingKeys: String, CodingKey {
-    case normalizedX, normalizedY, normalizedWidth, fontSize, fontName
+    case normalizedX, normalizedY, normalizedWidth, rotation, opacity
+    case fontSize, fontName
     case fontWeight, textAlignment, foregroundHex, backgroundEnabled
     case backgroundHex
     case strokeHex, strokeWidth, textPadding, cornerRadius
@@ -510,6 +513,8 @@ struct CaptionStyle: Codable, Equatable {
     normalizedX: Double = 0.5,
     normalizedY: Double = 0.84,
     normalizedWidth: Double = 0.82,
+    rotation: Double = 0,
+    opacity: Double = 1,
     fontSize: Double = 58,
     fontName: String = "Helvetica Neue",
     fontWeight: CaptionFontWeight = .semibold,
@@ -525,6 +530,8 @@ struct CaptionStyle: Codable, Equatable {
     self.normalizedX = normalizedX
     self.normalizedY = normalizedY
     self.normalizedWidth = normalizedWidth
+    self.rotation = rotation
+    self.opacity = opacity
     self.fontSize = fontSize
     self.fontName = fontName
     self.fontWeight = fontWeight
@@ -546,6 +553,10 @@ struct CaptionStyle: Codable, Equatable {
       try values.decodeIfPresent(Double.self, forKey: .normalizedY) ?? 0.84
     normalizedWidth =
       try values.decodeIfPresent(Double.self, forKey: .normalizedWidth) ?? 0.82
+    rotation =
+      try values.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
+    opacity =
+      try values.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
     fontSize =
       try values.decodeIfPresent(Double.self, forKey: .fontSize) ?? 58
     fontName =
@@ -583,6 +594,8 @@ struct CaptionStyle: Codable, Equatable {
     normalizedX = item.normalizedX
     normalizedY = item.normalizedY
     normalizedWidth = item.normalizedWidth
+    rotation = item.rotation
+    opacity = item.opacity
     fontSize = item.fontSize
     fontName = item.fontName
     fontWeight = item.fontWeight
@@ -604,6 +617,16 @@ struct CaptionStyle: Codable, Equatable {
     return style
   }
 
+  static func defaultStyle(for kind: OverlayKind) -> CaptionStyle {
+    guard kind == .text else { return CaptionStyle() }
+    return CaptionStyle(
+      normalizedY: 0.5,
+      normalizedWidth: 0.5,
+      fontSize: 64,
+      backgroundHex: "#00000099"
+    )
+  }
+
   func adaptingBuiltInPosition(to canvas: CanvasPreset) -> CaptionStyle {
     let isBuiltIn = CaptionStylePreset.allCases.contains { $0.style == self }
     guard isBuiltIn else { return self }
@@ -616,6 +639,8 @@ struct CaptionStyle: Codable, Equatable {
     item.normalizedX = normalizedX
     item.normalizedY = normalizedY
     item.normalizedWidth = normalizedWidth
+    item.rotation = rotation
+    item.opacity = opacity
     item.fontSize = fontSize
     item.fontName = fontName
     item.fontWeight = fontWeight
@@ -699,12 +724,127 @@ struct TrimPreviewAdjustment: Equatable {
   let width: CGFloat
 }
 
+struct TimelineZoomAnchorGeometry: Equatable {
+  let contentProgress: CGFloat
+  let viewportProgress: CGFloat
+}
+
+struct TimelineViewportSkimmerGeometry: Equatable {
+  let x: CGFloat
+  let isSnapped: Bool
+}
+
 enum TimelineInteractionGeometry {
+  static func trimInteractionWidth(
+    cardWidth: CGFloat,
+    exteriorInset: CGFloat
+  ) -> CGFloat {
+    max(0, cardWidth) + 2 * max(0, exteriorInset)
+  }
+
+  static func thumbnailOffset(
+    for edge: TrimEdge?,
+    adjustment: TrimPreviewAdjustment
+  ) -> CGFloat {
+    edge == .leading ? -adjustment.offset : 0
+  }
+
+  static func trimHandleWidth(
+    cardWidth: CGFloat,
+    preferredWidth: CGFloat,
+    exteriorInset: CGFloat
+  ) -> CGFloat {
+    max(0, exteriorInset)
+      + min(max(0, preferredWidth), max(0, cardWidth) / 2)
+  }
+
   static func contentX(
     viewportX: CGFloat,
     contentMinX: CGFloat
   ) -> CGFloat {
     viewportX - contentMinX
+  }
+
+  static func zoomAnchor(
+    contentWidth: CGFloat,
+    viewportWidth: CGFloat,
+    contentMinX: CGFloat,
+    pointerViewportX: CGFloat?,
+    playheadProgress: CGFloat
+  ) -> TimelineZoomAnchorGeometry {
+    guard contentWidth > 0, viewportWidth > 0 else {
+      return TimelineZoomAnchorGeometry(
+        contentProgress: 0,
+        viewportProgress: 0.5
+      )
+    }
+
+    let clampedPlayheadProgress = min(1, max(0, playheadProgress))
+    let anchorViewportX: CGFloat
+    let anchorContentX: CGFloat
+
+    if let pointerViewportX,
+      (0...viewportWidth).contains(pointerViewportX)
+    {
+      anchorViewportX = pointerViewportX
+      anchorContentX = pointerViewportX - contentMinX
+    } else {
+      let playheadViewportX =
+        contentMinX + contentWidth * clampedPlayheadProgress
+      if (0...viewportWidth).contains(playheadViewportX) {
+        anchorViewportX = playheadViewportX
+        anchorContentX = contentWidth * clampedPlayheadProgress
+      } else {
+        anchorViewportX = viewportWidth / 2
+        anchorContentX = anchorViewportX - contentMinX
+      }
+    }
+
+    return TimelineZoomAnchorGeometry(
+      contentProgress: min(1, max(0, anchorContentX / contentWidth)),
+      viewportProgress: min(1, max(0, anchorViewportX / viewportWidth))
+    )
+  }
+
+  static func zoomScrollOffset(
+    anchor: TimelineZoomAnchorGeometry,
+    contentWidth: CGFloat,
+    viewportWidth: CGFloat
+  ) -> CGFloat {
+    guard contentWidth > 0, viewportWidth > 0 else { return 0 }
+    let desiredOffset =
+      anchor.contentProgress * contentWidth
+      - anchor.viewportProgress * viewportWidth
+    return min(max(0, desiredOffset), max(0, contentWidth - viewportWidth))
+  }
+
+  static func viewportSkimmerX(
+    pointerViewportX: CGFloat,
+    viewportWidth: CGFloat
+  ) -> CGFloat {
+    min(max(0, pointerViewportX), max(0, viewportWidth))
+  }
+
+  static func viewportSkimmer(
+    pointerViewportX: CGFloat,
+    anchoredViewportX: CGFloat?,
+    viewportWidth: CGFloat,
+    snapDistance: CGFloat
+  ) -> TimelineViewportSkimmerGeometry {
+    let pointerX = viewportSkimmerX(
+      pointerViewportX: pointerViewportX,
+      viewportWidth: viewportWidth
+    )
+    guard let anchoredViewportX,
+      (0...max(0, viewportWidth)).contains(anchoredViewportX),
+      abs(pointerX - anchoredViewportX) <= max(0, snapDistance)
+    else {
+      return TimelineViewportSkimmerGeometry(x: pointerX, isSnapped: false)
+    }
+    return TimelineViewportSkimmerGeometry(
+      x: anchoredViewportX,
+      isSnapped: true
+    )
   }
 
   static func time(
@@ -723,6 +863,115 @@ enum TimelineInteractionGeometry {
     threshold: CGFloat
   ) -> CGFloat {
     abs(x - targetX) <= max(0, threshold) ? targetX : x
+  }
+
+  static func visibleSkimmerX(
+    _ hoveredX: CGFloat?,
+    isTrimming: Bool
+  ) -> CGFloat? {
+    isTrimming ? nil : hoveredX
+  }
+
+  static func showsClipIndex(width: CGFloat) -> Bool {
+    width >= 34
+  }
+
+  static func showsClipDuration(width: CGFloat) -> Bool {
+    width >= 96
+  }
+}
+
+struct TimelineWaveformSegmentGeometry: Equatable {
+  let logicalStartX: CGFloat
+  let logicalEndX: CGFloat
+  let cardFrame: CGRect
+  let waveformFrame: CGRect
+  let sampleRange: Range<Int>
+}
+
+enum TimelineWaveformGeometry {
+  static func segment(
+    timelineStart: Double,
+    clipDuration: Double,
+    totalDuration: Double,
+    trackWidth: CGFloat,
+    visualGap: CGFloat,
+    sampleCount: Int,
+    trimEdge: TrimEdge?,
+    adjustment: TrimPreviewAdjustment
+  ) -> TimelineWaveformSegmentGeometry {
+    guard totalDuration > 0, trackWidth > 0, clipDuration > 0,
+      sampleCount > 0
+    else {
+      return TimelineWaveformSegmentGeometry(
+        logicalStartX: 0,
+        logicalEndX: 0,
+        cardFrame: .zero,
+        waveformFrame: .zero,
+        sampleRange: 0..<0
+      )
+    }
+
+    let pixelsPerSecond = trackWidth / totalDuration
+    let rawStartX = pixelsPerSecond * timelineStart
+    let rawWidth = pixelsPerSecond * clipDuration
+    let logicalStartX = rawStartX + adjustment.offset
+    let logicalEndX = rawStartX + rawWidth
+      + adjustment.offset + adjustment.width
+    let gap = max(0, visualGap)
+    let cardFrame = CGRect(
+      x: logicalStartX + gap / 2,
+      y: 0,
+      width: max(1, logicalEndX - logicalStartX - gap),
+      height: 0
+    )
+    var waveformFrame = cardFrame
+    var sampleStart = timelineStart
+    var sampleEnd = timelineStart + clipDuration
+
+    switch trimEdge {
+    case .leading:
+      let delta = Double(adjustment.offset / pixelsPerSecond)
+      if delta > 0 {
+        sampleStart += delta
+      } else if delta < 0 {
+        waveformFrame.origin.x -= adjustment.offset
+        waveformFrame.size.width = max(1, rawWidth - gap)
+      }
+    case .trailing:
+      let delta = Double(adjustment.width / pixelsPerSecond)
+      if delta < 0 {
+        sampleEnd += delta
+      } else if delta > 0 {
+        waveformFrame.size.width = max(1, rawWidth - gap)
+      }
+    case nil:
+      break
+    }
+
+    sampleStart = min(max(0, sampleStart), totalDuration)
+    sampleEnd = min(max(sampleStart, sampleEnd), totalDuration)
+    let lower = min(
+      sampleCount - 1,
+      max(
+        0,
+        Int((sampleStart / totalDuration * Double(sampleCount)).rounded())
+      )
+    )
+    let upper = min(
+      sampleCount,
+      max(
+        lower + 1,
+        Int((sampleEnd / totalDuration * Double(sampleCount)).rounded())
+      )
+    )
+    return TimelineWaveformSegmentGeometry(
+      logicalStartX: logicalStartX,
+      logicalEndX: logicalEndX,
+      cardFrame: cardFrame,
+      waveformFrame: waveformFrame,
+      sampleRange: lower..<upper
+    )
   }
 }
 

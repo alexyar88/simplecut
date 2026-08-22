@@ -1,12 +1,104 @@
 import AppKit
 import SwiftUI
 
+struct TimelineZoomScrollRequest: Equatable {
+  let id: UUID
+  let anchor: TimelineZoomAnchorGeometry
+}
+
+@MainActor
+final class TimelineScrollCoordinator: NSObject, ObservableObject {
+  @Published private(set) var offset: CGFloat = 0
+  private weak var scrollView: NSScrollView?
+  private var contentWidth: CGFloat = 0
+  private var viewportWidth: CGFloat = 0
+
+  func attach(
+    to scrollView: NSScrollView,
+    contentWidth: CGFloat,
+    viewportWidth: CGFloat
+  ) {
+    if self.scrollView !== scrollView {
+      NotificationCenter.default.removeObserver(self)
+      self.scrollView = scrollView
+      scrollView.contentView.postsBoundsChangedNotifications = true
+      NotificationCenter.default.addObserver(
+        self,
+        selector: #selector(scrollBoundsDidChange),
+        name: NSView.boundsDidChangeNotification,
+        object: scrollView.contentView
+      )
+    }
+    self.contentWidth = contentWidth
+    self.viewportWidth = viewportWidth
+    updateOffset()
+  }
+
+  func zoomAnchor(
+    pointerViewportX: CGFloat?,
+    playheadProgress: CGFloat
+  ) -> TimelineZoomAnchorGeometry {
+    let anchor = TimelineInteractionGeometry.zoomAnchor(
+      contentWidth: contentWidth,
+      viewportWidth: viewportWidth,
+      contentMinX: -nativeOffset,
+      pointerViewportX: pointerViewportX,
+      playheadProgress: playheadProgress
+    )
+    return anchor
+  }
+
+  func apply(
+    request: TimelineZoomScrollRequest,
+    contentWidth: CGFloat,
+    viewportWidth: CGFloat
+  ) -> Bool {
+    guard let scrollView else { return false }
+    self.contentWidth = contentWidth
+    self.viewportWidth = viewportWidth
+    let nextOffset = TimelineInteractionGeometry.zoomScrollOffset(
+      anchor: request.anchor,
+      contentWidth: contentWidth,
+      viewportWidth: viewportWidth
+    )
+    let currentOrigin = scrollView.contentView.bounds.origin
+    scrollView.contentView.scroll(
+      to: NSPoint(x: nextOffset, y: currentOrigin.y)
+    )
+    scrollView.reflectScrolledClipView(scrollView.contentView)
+    updateOffset()
+    return abs(scrollView.contentView.bounds.origin.x - nextOffset) <= 0.5
+  }
+
+  private var nativeOffset: CGFloat {
+    scrollView?.contentView.bounds.origin.x ?? offset
+  }
+
+  @objc private func scrollBoundsDidChange(_ notification: Notification) {
+    updateOffset()
+  }
+
+  private func updateOffset() {
+    let nextOffset = nativeOffset
+    if abs(offset - nextOffset) > 0.01 {
+      offset = nextOffset
+    }
+  }
+
+  deinit {
+    NotificationCenter.default.removeObserver(self)
+  }
+}
+
 struct TimelineView: View {
   @EnvironmentObject private var project: EditorProject
   let playback: PlaybackState
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var isTrimming = false
   @State private var zoomAtMagnificationStart: Double?
+  @State private var zoomAnchorAtMagnificationStart: TimelineZoomAnchorGeometry?
+  @State private var zoomScrollRequest: TimelineZoomScrollRequest?
+  @StateObject private var scrollCoordinator = TimelineScrollCoordinator()
   @State private var activeTrimClipID: UUID?
   @State private var activeTrimEdge: TrimEdge?
   @State private var trimDragOffset: CGFloat = 0
@@ -15,16 +107,21 @@ struct TimelineView: View {
   @State private var activeOverlayEdge: TrimEdge?
   @State private var overlayDragOffset: CGFloat = 0
   @State private var hoveredClipID: UUID?
+  @State private var hoveredTrimClipID: UUID?
+  @State private var hoveredTrimEdge: TrimEdge?
   @State private var lastSkimmedFrame: Int?
   // Keep the pointer in viewport coordinates. Content coordinates change when
   // the scroll view zooms or scrolls, even if the mouse itself does not move.
   @State private var hoveredTimelineViewportX: CGFloat?
-  @State private var timelineContentMinX: CGFloat = 0
   @State private var draggedClipID: UUID?
   @State private var clipDropInsertionIndex: Int?
   @State private var clipReorderTranslation: CGFloat = 0
   private let maximumTimelineZoom = 64.0
+  // Keep cuts visually separated without moving their edit coordinate. Video
+  // and audio cards are inset symmetrically; waveform and trim guides below
+  // continue to use the logical boundary at the center of this gap.
   private let clipGap: CGFloat = 10
+  private let clipCornerRadius = EditorTheme.compactCornerRadius
   private let playheadSnapDistance: CGFloat = 7
 
   var body: some View {
@@ -71,13 +168,6 @@ struct TimelineView: View {
           viewport.size.width,
           viewport.size.width * project.timelineZoom
         )
-        let hoveredContentX = hoveredTimelineViewportX.map {
-          timelineContentX(
-            viewportX: $0,
-            contentMinX: timelineContentMinX,
-            contentWidth: contentWidth
-          )
-        }
         ScrollView(.horizontal) {
           VStack(spacing: 8) {
             timelineTickRuler(width: contentWidth)
@@ -94,52 +184,52 @@ struct TimelineView: View {
           .contentShape(Rectangle())
           .help("Ведите указателем по таймлайну для быстрого просмотра")
           .background {
-            GeometryReader { content in
-              Color.clear.preference(
-                key: TimelineContentMinXPreferenceKey.self,
-                value: content.frame(in: .named("timelineViewport")).minX
-              )
-            }
+            TimelineZoomScrollController(
+              coordinator: scrollCoordinator,
+              request: zoomScrollRequest,
+              contentWidth: contentWidth,
+              viewportWidth: viewport.size.width
+            )
           }
           .overlay(alignment: .topLeading) {
             TimelineGlobalPlayhead(
               playback: playback,
               duration: project.duration,
-              contentWidth: contentWidth,
-              hoveredX: hoveredContentX,
-              snapDistance: playheadSnapDistance
+              contentWidth: contentWidth
             )
           }
         }
         .coordinateSpace(name: "timelineViewport")
         .scrollIndicators(.visible)
-        .onPreferenceChange(TimelineContentMinXPreferenceKey.self) { minX in
-          timelineContentMinX = minX
-          if let viewportX = hoveredTimelineViewportX {
-            updateTimelinePointer(
-              viewportX: viewportX,
-              contentMinX: minX,
-              contentWidth: contentWidth
-            )
-          }
-        }
         .overlay {
-          TimelinePointerTrackingView(
-            onMoved: { viewportX in
-              hoveredTimelineViewportX = viewportX
-              updateTimelinePointer(
+          ZStack(alignment: .topLeading) {
+            if let viewportX = hoveredTimelineViewportX, !isTrimming {
+              TimelineViewportSkimmer(
                 viewportX: viewportX,
-                contentMinX: timelineContentMinX,
-                contentWidth: contentWidth
+                anchoredViewportX: playback.isPlaying || project.duration <= 0
+                  ? nil
+                  : contentWidth * playback.anchoredPlayhead / project.duration
+                    - scrollCoordinator.offset,
+                snapDistance: playheadSnapDistance
               )
-            },
-            onExited: {
-              lastSkimmedFrame = nil
-              hoveredTimelineViewportX = nil
-              playback.timelineSkimmerTime = nil
             }
-          )
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+            TimelinePointerTrackingView(
+              onMoved: { viewportX in
+                hoveredTimelineViewportX = viewportX
+                updateTimelinePointer(
+                  viewportX: viewportX,
+                  contentMinX: -scrollCoordinator.offset,
+                  contentWidth: contentWidth
+                )
+              },
+              onExited: {
+                lastSkimmedFrame = nil
+                hoveredTimelineViewportX = nil
+                playback.timelineSkimmerTime = nil
+              }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+          }
         }
         .simultaneousGesture(
           SpatialTapGesture(coordinateSpace: .local)
@@ -147,7 +237,7 @@ struct TimelineView: View {
               guard !isTrimming else { return }
               let contentX = TimelineInteractionGeometry.contentX(
                 viewportX: value.location.x,
-                contentMinX: timelineContentMinX
+                contentMinX: -scrollCoordinator.offset
               )
               let time = TimelineInteractionGeometry.time(
                 at: snappedTimelineX(contentX, width: contentWidth),
@@ -164,21 +254,35 @@ struct TimelineView: View {
                 zoomAtMagnificationStart ?? project.timelineZoom
               if zoomAtMagnificationStart == nil {
                 zoomAtMagnificationStart = initialZoom
+                zoomAnchorAtMagnificationStart = currentZoomAnchor()
               }
-              project.timelineZoom = min(
-                maximumTimelineZoom,
-                max(1, initialZoom * Double(magnification))
+              setTimelineZoom(
+                min(
+                  maximumTimelineZoom,
+                  max(1, initialZoom * Double(magnification))
+                ),
+                anchor: zoomAnchorAtMagnificationStart
               )
             }
             .onEnded { _ in
               zoomAtMagnificationStart = nil
+              zoomAnchorAtMagnificationStart = nil
             }
         )
         .onChange(of: project.timelineZoom) {
           if let viewportX = hoveredTimelineViewportX {
             updateTimelinePointer(
               viewportX: viewportX,
-              contentMinX: timelineContentMinX,
+              contentMinX: -scrollCoordinator.offset,
+              contentWidth: contentWidth
+            )
+          }
+        }
+        .onChange(of: scrollCoordinator.offset) {
+          if let viewportX = hoveredTimelineViewportX {
+            updateTimelinePointer(
+              viewportX: viewportX,
+              contentMinX: -scrollCoordinator.offset,
               contentWidth: contentWidth
             )
           }
@@ -215,7 +319,10 @@ struct TimelineView: View {
         .disabled(project.clips.isEmpty || project.timelineZoom <= 1)
         .accessibilityLabel("Уменьшить масштаб")
         Slider(
-          value: $project.timelineZoom,
+          value: Binding(
+            get: { project.timelineZoom },
+            set: { setTimelineZoom($0) }
+          ),
           in: 1...maximumTimelineZoom,
           step: 0.25
         )
@@ -347,8 +454,8 @@ struct TimelineView: View {
         trimPreviewBand(
           for: clip,
           at: index,
-          baseOffset: rawOffset + clipGap / 2,
-          baseWidth: max(2, rawWidth - clipGap),
+          baseOffset: rawOffset,
+          baseWidth: max(2, rawWidth),
           trackSize: size,
           height: size.height - 4
         )
@@ -367,8 +474,20 @@ struct TimelineView: View {
     trackSize: CGSize
   ) -> some View {
     let isSelected = project.isClipSelected(clip.id)
+    let pixelsPerSecond = trackSize.width / max(project.duration, 0.01)
+    let gapInset = clipGap / 2
+    let trimHandleWidth = TimelineInteractionGeometry.trimHandleWidth(
+      cardWidth: width,
+      preferredWidth: 16,
+      exteriorInset: gapInset
+    )
+    let trimInteractionWidth =
+      TimelineInteractionGeometry.trimInteractionWidth(
+        cardWidth: width,
+        exteriorInset: gapInset
+      )
     let shadowColor =
-      isSelected ? Color.accentColor.opacity(0.34) : .black.opacity(0.28)
+      isSelected ? EditorTheme.accent.opacity(0.34) : .black.opacity(0.28)
     return clipCard(
       clip: clip,
       index: index,
@@ -380,19 +499,56 @@ struct TimelineView: View {
     // Constrain the live trim preview before applying its background and mask.
     // Otherwise the original-width thumbnail can render past the dragged edge
     // and cover the next clip until the edit is committed.
-    .frame(width: width, height: trackSize.height - 4)
-    .background(
-      Color(nsColor: .controlAccentColor).opacity(isSelected ? 0.38 : 0.24),
-      in: RoundedRectangle(cornerRadius: 9)
+    // The live trim changes the outer frame. Pinning the clip content to its
+    // leading edge is essential: the default centered alignment makes the
+    // thumbnail strip drift by half of every trim translation.
+    .frame(
+      width: width,
+      height: trackSize.height - 4,
+      alignment: .leading
     )
-    .clipShape(RoundedRectangle(cornerRadius: 9))
+    .background(
+      EditorTheme.accent.opacity(isSelected ? 0.38 : 0.24),
+      in: RoundedRectangle(cornerRadius: clipCornerRadius)
+    )
+    .clipShape(RoundedRectangle(cornerRadius: clipCornerRadius))
+    // Adjacent trim hit regions meet at the logical edit point. There is no
+    // arrow-cursor dead zone between the two resize cursors at a split.
+    .overlay {
+      HStack(spacing: 0) {
+        trimHandle(
+          clip: clip,
+          edge: .leading,
+          pixelsPerSecond: pixelsPerSecond,
+          hitWidth: trimHandleWidth
+        )
+        Spacer(minLength: 0)
+        trimHandle(
+          clip: clip,
+          edge: .trailing,
+          pixelsPerSecond: pixelsPerSecond,
+          hitWidth: trimHandleWidth
+        )
+      }
+      .frame(
+        width: trimInteractionWidth,
+        height: trackSize.height - 4
+      )
+    }
+    .overlay(alignment: .leading) {
+      trimEdgeIndicator(for: clip, edge: .leading)
+        .offset(x: -gapInset)
+    }
+    .overlay(alignment: .trailing) {
+      trimEdgeIndicator(for: clip, edge: .trailing)
+        .offset(x: gapInset)
+    }
     .shadow(
       color: shadowColor,
       radius: isSelected ? 3 : (hoveredClipID == clip.id ? 3 : 1),
       y: 1
     )
     .brightness(hoveredClipID == clip.id ? 0.045 : 0)
-    .offset(y: hoveredClipID == clip.id && !isTrimming ? -1 : 0)
     .animation(
       reduceMotion ? nil : EditorTheme.quickAnimation,
       value: hoveredClipID == clip.id
@@ -423,7 +579,10 @@ struct TimelineView: View {
       clipContextMenu(clip: clip, index: index, start: start)
     }
     .gesture(clipReorderGesture(for: clip, trackSize: trackSize))
-    .help("Нажмите, чтобы выбрать · перетащите, чтобы изменить порядок")
+    .help(
+      "Фрагмент \(index + 1) · \(clip.duration.timestamp)\n"
+        + "Нажмите, чтобы выбрать · перетащите, чтобы изменить порядок"
+    )
     .accessibilityElement(children: .ignore)
     .accessibilityIdentifier("timeline-clip-\(index + 1)")
     .accessibilityLabel("Фрагмент \(index + 1)")
@@ -664,10 +823,32 @@ struct TimelineView: View {
   }
 
   private func adjustZoom(by delta: Double) {
-    project.timelineZoom = min(
-      maximumTimelineZoom,
-      max(1, project.timelineZoom + delta)
+    setTimelineZoom(
+      min(maximumTimelineZoom, max(1, project.timelineZoom + delta))
     )
+  }
+
+  private func currentZoomAnchor() -> TimelineZoomAnchorGeometry {
+    let playheadProgress = project.duration > 0
+      ? CGFloat(playback.anchoredPlayhead / project.duration)
+      : 0
+    return scrollCoordinator.zoomAnchor(
+      pointerViewportX: hoveredTimelineViewportX,
+      playheadProgress: playheadProgress
+    )
+  }
+
+  private func setTimelineZoom(
+    _ zoom: Double,
+    anchor: TimelineZoomAnchorGeometry? = nil
+  ) {
+    let clampedZoom = min(maximumTimelineZoom, max(1, zoom))
+    guard abs(clampedZoom - project.timelineZoom) > 0.000_001 else { return }
+    zoomScrollRequest = TimelineZoomScrollRequest(
+      id: UUID(),
+      anchor: anchor ?? currentZoomAnchor()
+    )
+    project.timelineZoom = clampedZoom
   }
 
   private func splitClipInMiddle(_ clip: VideoClip, start: Double) {
@@ -684,8 +865,6 @@ struct TimelineView: View {
     trackSize: CGSize
   ) -> some View {
     let isSelected = project.isClipSelected(clip.id)
-    let pixelsPerSecond =
-      trackSize.width / max(project.duration, 0.01)
     let thumbnailAdjustment = trimDrag(
       for: clip,
       at: index,
@@ -695,8 +874,11 @@ struct TimelineView: View {
       ClipThumbnailStrip(clip: clip, width: thumbnailWidth)
         .frame(width: thumbnailWidth)
         .offset(
-          x: activeTrimClipID == clip.id && activeTrimEdge == .leading
-            ? -thumbnailAdjustment.offset
+          x: activeTrimClipID == clip.id
+            ? TimelineInteractionGeometry.thumbnailOffset(
+              for: activeTrimEdge,
+              adjustment: thumbnailAdjustment
+            )
             : 0
         )
       LinearGradient(
@@ -707,24 +889,12 @@ struct TimelineView: View {
         startPoint: .top,
         endPoint: .bottom
       )
+      if isSelected {
+        EditorTheme.accent.opacity(0.10)
+          .allowsHitTesting(false)
+      }
       clipMetadata(clip: clip, index: index, width: width)
 
-      // Keep the invisible edge hit areas alive for every clip. Creating them
-      // only after hover meant a newly split clip could miss the cursor event.
-      HStack {
-        trimHandle(
-          clip: clip,
-          edge: .leading,
-          pixelsPerSecond: pixelsPerSecond
-        )
-        Spacer(minLength: 0)
-        trimHandle(
-          clip: clip,
-          edge: .trailing,
-          pixelsPerSecond: pixelsPerSecond
-        )
-      }
-      .zIndex(2)
       if activeTrimClipID == clip.id {
         VStack {
           Text(
@@ -739,9 +909,9 @@ struct TimelineView: View {
         }
         .allowsHitTesting(false)
       }
-      RoundedRectangle(cornerRadius: 9)
+      RoundedRectangle(cornerRadius: clipCornerRadius)
         .strokeBorder(
-          isSelected ? Color.accentColor : Color.white.opacity(0.22),
+          isSelected ? EditorTheme.accent : Color.white.opacity(0.22),
           lineWidth: isSelected ? 1.5 : 0.75
         )
         .allowsHitTesting(false)
@@ -753,38 +923,46 @@ struct TimelineView: View {
     index: Int,
     width: CGFloat
   ) -> some View {
-    VStack {
-      Spacer()
-      HStack(spacing: 5) {
-        Text("\(index + 1)")
-          .font(.caption2.bold())
-          .padding(.horizontal, 5)
-          .padding(.vertical, 2)
-          .background(.black.opacity(0.58), in: Capsule())
-        if width >= 76 {
-          Text(clip.duration.timestamp)
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(.white.opacity(0.92))
+    Group {
+      if TimelineInteractionGeometry.showsClipIndex(width: width) {
+        VStack {
+          Spacer()
+          HStack(spacing: 5) {
+            Text("\(index + 1)")
+              .font(.caption2.bold())
+              .padding(.horizontal, 5)
+              .padding(.vertical, 2)
+              .background(.black.opacity(0.62), in: Capsule())
+            Spacer(minLength: 0)
+            if TimelineInteractionGeometry.showsClipDuration(width: width) {
+              Text(clip.duration.timestamp)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.white.opacity(0.92))
+                .lineLimit(1)
+            }
+          }
+          .padding(7)
         }
-        Spacer(minLength: 0)
       }
-      .padding(7)
     }
+    .allowsHitTesting(false)
   }
 
   private func trimDrag(
     for clip: VideoClip,
     at index: Int,
     in size: CGSize
-  ) -> (offset: CGFloat, width: CGFloat) {
+  ) -> TrimPreviewAdjustment {
     guard let activeTrimClipID, let activeTrimEdge,
       let activeIndex = project.clips.firstIndex(where: {
         $0.id == activeTrimClipID
       })
     else {
-      return (0, 0)
+      return TrimPreviewAdjustment(offset: 0, width: 0)
     }
-    guard index == activeIndex else { return (0, 0) }
+    guard index == activeIndex else {
+      return TrimPreviewAdjustment(offset: 0, width: 0)
+    }
     let pixelsPerSecond = size.width / max(project.duration, 0.01)
     let activeClip = project.clips[activeIndex]
     let adjustment = TrimPreviewGeometry.adjustment(
@@ -793,7 +971,7 @@ struct TimelineView: View {
       translation: trimDragOffset,
       pixelsPerSecond: pixelsPerSecond
     )
-    return (adjustment.offset, adjustment.width)
+    return adjustment
   }
 
   private func trimPreviewDuration(
@@ -872,9 +1050,20 @@ struct TimelineView: View {
   private func trimHandle(
     clip: VideoClip,
     edge: TrimEdge,
-    pixelsPerSecond: Double
+    pixelsPerSecond: Double,
+    hitWidth: CGFloat
   ) -> some View {
     TimelineTrimHandleView(
+      edge: edge,
+      onHoverChanged: { isHovered in
+        if isHovered {
+          hoveredTrimClipID = clip.id
+          hoveredTrimEdge = edge
+        } else if hoveredTrimClipID == clip.id && hoveredTrimEdge == edge {
+          hoveredTrimClipID = nil
+          hoveredTrimEdge = nil
+        }
+      },
       onDragChanged: { translation in
         if !isTrimming {
           project.selectClip(id: clip.id)
@@ -906,7 +1095,7 @@ struct TimelineView: View {
         }
       }
     )
-      .frame(width: 12)
+      .frame(width: hitWidth)
       .frame(maxHeight: .infinity)
       .help(
         edge == .leading
@@ -928,6 +1117,23 @@ struct TimelineView: View {
       }
   }
 
+  @ViewBuilder
+  private func trimEdgeIndicator(
+    for clip: VideoClip,
+    edge: TrimEdge
+  ) -> some View {
+    let isHovered = hoveredTrimClipID == clip.id && hoveredTrimEdge == edge
+    let isActive = activeTrimClipID == clip.id && activeTrimEdge == edge
+    if isHovered || isActive {
+      Capsule()
+        .fill(isActive ? Color.yellow : Color.white.opacity(0.92))
+        .frame(width: 3, height: 44)
+        .shadow(color: .black.opacity(0.7), radius: 1)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+  }
+
   private func audioTrack(
     width trackWidth: CGFloat,
     clipLayout: [TimelineClipLayout]
@@ -937,85 +1143,11 @@ struct TimelineView: View {
         .fill(EditorTheme.canvas)
       audioClipSegments(width: trackWidth, clipLayout: clipLayout)
       Canvas { context, canvas in
-        guard !project.waveform.isEmpty else { return }
-        let samples = WaveformPresentation.displaySamples(
-          from: project.waveform,
-          settings: project.audio,
-          targetSampleCount: max(2, Int(ceil(canvas.width * 2)))
+        drawAudioWaveform(
+          context: &context,
+          canvas: canvas,
+          clipLayout: clipLayout
         )
-        let center = canvas.height / 2
-        let maximumAmplitude = max(1, center - 2)
-        let step = canvas.width / CGFloat(max(1, samples.count - 1))
-        var envelopePath = Path()
-        var limiterPath = Path()
-        var clippingPath = Path()
-        if let first = samples.first {
-          let firstAmplitude = CGFloat(first.level) * maximumAmplitude
-          envelopePath.move(
-            to: CGPoint(x: 0, y: center - firstAmplitude)
-          )
-          for (index, sample) in samples.dropFirst().enumerated() {
-            let x = CGFloat(index + 1) * step
-            let amplitude = CGFloat(sample.level) * maximumAmplitude
-            envelopePath.addLine(to: CGPoint(x: x, y: center - amplitude))
-          }
-          for index in samples.indices.reversed() {
-            let x = CGFloat(index) * step
-            let amplitude = CGFloat(samples[index].level) * maximumAmplitude
-            envelopePath.addLine(to: CGPoint(x: x, y: center + amplitude))
-          }
-          envelopePath.closeSubpath()
-        }
-        for (index, sample) in samples.enumerated() {
-          let x = CGFloat(index) * step
-          let amplitude = CGFloat(sample.level) * maximumAmplitude
-          if sample.reachesLimiter {
-            let markerInset: CGFloat = sample.clipsWithoutLimiter ? 0 : 1
-            limiterPath.move(to: CGPoint(x: x, y: center - amplitude + markerInset))
-            limiterPath.addLine(to: CGPoint(x: x, y: center - amplitude + 2.5))
-            limiterPath.move(to: CGPoint(x: x, y: center + amplitude - markerInset))
-            limiterPath.addLine(to: CGPoint(x: x, y: center + amplitude - 2.5))
-          }
-          if sample.clipsWithoutLimiter {
-            clippingPath.move(to: CGPoint(x: x, y: center - amplitude))
-            clippingPath.addLine(to: CGPoint(x: x, y: center - amplitude + 1))
-            clippingPath.move(to: CGPoint(x: x, y: center + amplitude))
-            clippingPath.addLine(to: CGPoint(x: x, y: center + amplitude - 1))
-          }
-        }
-        context.fill(
-          envelopePath,
-          with: .color(EditorTheme.audioWave.opacity(0.82))
-        )
-        var silencePath = Path()
-        silencePath.move(to: CGPoint(x: 0, y: center))
-        silencePath.addLine(to: CGPoint(x: canvas.width, y: center))
-        context.stroke(
-          silencePath,
-          with: .color(EditorTheme.audioWave.opacity(0.7)),
-          lineWidth: 0.75
-        )
-        let lineWidth = max(1, min(2, step * 0.65))
-        context.stroke(limiterPath, with: .color(EditorTheme.audioWarning), lineWidth: lineWidth)
-        context.stroke(clippingPath, with: .color(EditorTheme.audioClipping), lineWidth: lineWidth)
-
-        if project.audio.normalizeLoudness {
-          let ceiling = CGFloat(pow(10, project.audio.peakCeilingDB / 20))
-          let limitOffset = maximumAmplitude * ceiling
-          var ceilingPath = Path()
-          ceilingPath.move(to: CGPoint(x: 0, y: center - limitOffset))
-          ceilingPath.addLine(to: CGPoint(x: canvas.width, y: center - limitOffset))
-          ceilingPath.move(to: CGPoint(x: 0, y: center + limitOffset))
-          ceilingPath.addLine(to: CGPoint(x: canvas.width, y: center + limitOffset))
-          context.stroke(
-            ceilingPath,
-            with: .color(EditorTheme.audioWarning.opacity(0.38)),
-            style: StrokeStyle(lineWidth: 0.75, dash: [3, 3])
-          )
-        }
-      }
-      .mask {
-        audioWaveformMask(width: trackWidth, clipLayout: clipLayout)
       }
       audioTrimPreviewBands(width: trackWidth, clipLayout: clipLayout)
     }
@@ -1043,6 +1175,135 @@ struct TimelineView: View {
     }
   }
 
+  private func drawAudioWaveform(
+    context: inout GraphicsContext,
+    canvas: CGSize,
+    clipLayout: [TimelineClipLayout]
+  ) {
+    guard !project.waveform.isEmpty, project.duration > 0 else { return }
+    let samples = WaveformPresentation.displaySamples(
+      from: project.waveform,
+      settings: project.audio,
+      targetSampleCount: max(2, Int(ceil(canvas.width * 2)))
+    )
+    guard !samples.isEmpty else { return }
+    for layout in clipLayout {
+      let clip = layout.clip
+      let adjustment = trimDrag(
+        for: clip,
+        at: layout.index,
+        in: CGSize(width: canvas.width, height: 34)
+      )
+      let geometry = TimelineWaveformGeometry.segment(
+        timelineStart: layout.start,
+        clipDuration: clip.duration,
+        totalDuration: project.duration,
+        trackWidth: canvas.width,
+        visualGap: clipGap,
+        sampleCount: samples.count,
+        trimEdge: activeTrimClipID == clip.id ? activeTrimEdge : nil,
+        adjustment: adjustment
+      )
+      drawAudioWaveformSegment(
+        context: &context,
+        samples: Array(samples[geometry.sampleRange]),
+        frame: CGRect(
+          x: geometry.waveformFrame.minX,
+          y: 0,
+          width: geometry.waveformFrame.width,
+          height: canvas.height
+        )
+      )
+    }
+  }
+
+  private func drawAudioWaveformSegment(
+    context: inout GraphicsContext,
+    samples: [WaveformPresentationSample],
+    frame: CGRect
+  ) {
+    guard !samples.isEmpty, frame.width > 0 else { return }
+    // Audio levels are magnitudes, so mirroring them around the center line
+    // duplicates the same information. Anchor silence to the bottom and use
+    // the full card height for a denser, more legible one-sided waveform.
+    let baseline = frame.maxY - 2
+    let maximumAmplitude = max(1, frame.height - 4)
+    let step = frame.width / CGFloat(max(1, samples.count - 1))
+    var envelopePath = Path()
+    var limiterPath = Path()
+    var clippingPath = Path()
+
+    if let first = samples.first {
+      let amplitude = CGFloat(first.level) * maximumAmplitude
+      envelopePath.move(to: CGPoint(x: frame.minX, y: baseline - amplitude))
+      for (index, sample) in samples.dropFirst().enumerated() {
+        let x = frame.minX + CGFloat(index + 1) * step
+        let amplitude = CGFloat(sample.level) * maximumAmplitude
+        envelopePath.addLine(to: CGPoint(x: x, y: baseline - amplitude))
+      }
+      envelopePath.addLine(to: CGPoint(x: frame.maxX, y: baseline))
+      envelopePath.addLine(to: CGPoint(x: frame.minX, y: baseline))
+      envelopePath.closeSubpath()
+    }
+
+    for (index, sample) in samples.enumerated() {
+      let x = frame.minX + CGFloat(index) * step
+      let amplitude = CGFloat(sample.level) * maximumAmplitude
+      if sample.reachesLimiter {
+        let markerInset: CGFloat = sample.clipsWithoutLimiter ? 0 : 1
+        limiterPath.move(
+          to: CGPoint(x: x, y: baseline - amplitude + markerInset)
+        )
+        limiterPath.addLine(to: CGPoint(x: x, y: baseline - amplitude + 2.5))
+      }
+      if sample.clipsWithoutLimiter {
+        clippingPath.move(to: CGPoint(x: x, y: baseline - amplitude))
+        clippingPath.addLine(to: CGPoint(x: x, y: baseline - amplitude + 1))
+      }
+    }
+
+    context.fill(
+      envelopePath,
+      with: .color(EditorTheme.audioWave.opacity(0.82))
+    )
+    var silencePath = Path()
+    silencePath.move(to: CGPoint(x: frame.minX, y: baseline))
+    silencePath.addLine(to: CGPoint(x: frame.maxX, y: baseline))
+    context.stroke(
+      silencePath,
+      with: .color(EditorTheme.audioWave.opacity(0.7)),
+      lineWidth: 0.75
+    )
+    let lineWidth = max(1, min(2, step * 0.65))
+    context.stroke(
+      limiterPath,
+      with: .color(EditorTheme.audioWarning),
+      lineWidth: lineWidth
+    )
+    context.stroke(
+      clippingPath,
+      with: .color(EditorTheme.audioClipping),
+      lineWidth: lineWidth
+    )
+
+    if project.audio.normalizeLoudness {
+      let ceiling = CGFloat(pow(10, project.audio.peakCeilingDB / 20))
+      let limitOffset = maximumAmplitude * ceiling
+      var ceilingPath = Path()
+      ceilingPath.move(
+        to: CGPoint(x: frame.minX, y: baseline - limitOffset)
+      )
+      ceilingPath.addLine(
+        to: CGPoint(x: frame.maxX, y: baseline - limitOffset)
+      )
+      context.stroke(
+        ceilingPath,
+        with: .color(EditorTheme.audioWarning.opacity(0.38)),
+        style: StrokeStyle(lineWidth: 0.75, dash: [3, 3])
+      )
+    }
+  }
+
   private func audioClipSegments(
     width trackWidth: CGFloat,
     clipLayout: [TimelineClipLayout]
@@ -1063,7 +1324,7 @@ struct TimelineView: View {
           at: index,
           in: CGSize(width: trackWidth, height: 34)
         )
-        RoundedRectangle(cornerRadius: 5)
+        RoundedRectangle(cornerRadius: clipCornerRadius)
           .fill(
             project.isClipSelected(clip.id)
               ? EditorTheme.audioBackgroundSelected
@@ -1071,8 +1332,8 @@ struct TimelineView: View {
           )
           .overlay {
             if project.isClipSelected(clip.id) {
-              RoundedRectangle(cornerRadius: 5)
-                .stroke(EditorTheme.selection.opacity(0.72), lineWidth: 1)
+              RoundedRectangle(cornerRadius: clipCornerRadius)
+                .stroke(EditorTheme.accent.opacity(0.82), lineWidth: 1)
             }
           }
           .frame(
@@ -1082,38 +1343,6 @@ struct TimelineView: View {
           .offset(x: x + clipGap / 2 + adjustment.offset)
       }
     }
-  }
-
-  private func audioWaveformMask(
-    width trackWidth: CGFloat,
-    clipLayout: [TimelineClipLayout]
-  ) -> some View {
-    ZStack(alignment: .leading) {
-      ForEach(clipLayout) { layout in
-        let index = layout.index
-        let clip = layout.clip
-        let start = layout.start
-        let segmentWidth = project.duration > 0
-          ? trackWidth * clip.duration / project.duration
-          : 0
-        let x = project.duration > 0
-          ? trackWidth * start / project.duration
-          : 0
-        let adjustment = trimDrag(
-          for: clip,
-          at: index,
-          in: CGSize(width: trackWidth, height: 34)
-        )
-        RoundedRectangle(cornerRadius: 5)
-          .fill(.white)
-          .frame(
-            width: max(1, segmentWidth - clipGap + adjustment.width),
-            height: 34
-          )
-          .offset(x: x + clipGap / 2 + adjustment.offset)
-      }
-    }
-    .frame(width: trackWidth, height: 38, alignment: .leading)
   }
 
   private func audioTrimPreviewBands(
@@ -1134,8 +1363,8 @@ struct TimelineView: View {
         trimPreviewBand(
           for: clip,
           at: index,
-          baseOffset: x + clipGap / 2,
-          baseWidth: max(1, segmentWidth - clipGap),
+          baseOffset: x,
+          baseWidth: max(1, segmentWidth),
           trackSize: CGSize(width: trackWidth, height: 34),
           height: 30
         )
@@ -1176,6 +1405,11 @@ struct TimelineView: View {
       pixelsPerSecond: pixelsPerSecond
     )
     let adjustedWidth = max(2, width + adjustment.width)
+    let trimHandleWidth = TimelineInteractionGeometry.trimHandleWidth(
+      cardWidth: adjustedWidth,
+      preferredWidth: 15,
+      exteriorInset: 0
+    )
 
     return RoundedRectangle(cornerRadius: 5)
       .fill(trackColor(for: item.kind))
@@ -1197,13 +1431,15 @@ struct TimelineView: View {
               overlayTrimHandle(
                 item: item,
                 edge: .leading,
-                pixelsPerSecond: pixelsPerSecond
+                pixelsPerSecond: pixelsPerSecond,
+                hitWidth: trimHandleWidth
               )
               Spacer(minLength: 0)
               overlayTrimHandle(
                 item: item,
                 edge: .trailing,
-                pixelsPerSecond: pixelsPerSecond
+                pixelsPerSecond: pixelsPerSecond,
+                hitWidth: trimHandleWidth
               )
             }
           }
@@ -1355,48 +1591,42 @@ struct TimelineView: View {
   private func overlayTrimHandle(
     item: OverlayItem,
     edge: TrimEdge,
-    pixelsPerSecond: CGFloat
+    pixelsPerSecond: CGFloat,
+    hitWidth: CGFloat
   ) -> some View {
-    RoundedRectangle(cornerRadius: 2)
-      .fill(.white)
-      .frame(width: 7)
-      .padding(.vertical, 3)
-      .contentShape(Rectangle().inset(by: -4))
-      .highPriorityGesture(
-        DragGesture(
-          minimumDistance: 1,
-          coordinateSpace: .global
+    TimelineTrimHandleView(
+      edge: edge,
+      onHoverChanged: { _ in },
+      onDragChanged: { translation in
+        activeOverlayID = item.id
+        activeOverlayEdge = edge
+        overlayDragOffset = translation
+      },
+      onDragEnded: { translation in
+        let delta = clampedOverlayTrim(
+          item: item,
+          edge: edge,
+          requestedOffset: translation,
+          pixelsPerSecond: pixelsPerSecond
         )
-          .onChanged { value in
-            activeOverlayID = item.id
-            activeOverlayEdge = edge
-            overlayDragOffset = value.translation.width
-          }
-          .onEnded { value in
-            let delta = clampedOverlayTrim(
-              item: item,
-              edge: edge,
-              requestedOffset: value.translation.width,
-              pixelsPerSecond: pixelsPerSecond
-            )
-            if abs(delta) > 0.5 {
-              project.recordUndoCheckpoint()
-              project.resizeOverlay(
-                id: item.id,
-                edge: edge,
-                by: delta / max(pixelsPerSecond, 0.01)
-              )
-            }
-            resetOverlayGesture()
-          }
-      )
-      .onContinuousHover { phase in
-        switch phase {
-        case .active:
-          NSCursor.resizeLeftRight.set()
-        case .ended:
-          NSCursor.arrow.set()
+        if abs(delta) > 0.5 {
+          project.recordUndoCheckpoint()
+          project.resizeOverlay(
+            id: item.id,
+            edge: edge,
+            by: delta / max(pixelsPerSecond, 0.01)
+          )
         }
+        resetOverlayGesture()
+      }
+    )
+      .frame(width: hitWidth)
+      .overlay {
+        RoundedRectangle(cornerRadius: 2)
+          .fill(.white)
+          .frame(width: 7)
+          .padding(.vertical, 3)
+          .allowsHitTesting(false)
       }
       .help(
         edge == .leading
@@ -1422,6 +1652,98 @@ struct TimelineView: View {
     case .caption: item.text ?? "Субтитры"
     case .image: "Изображение"
     }
+  }
+}
+
+/// Applies the exact horizontal offset after SwiftUI has laid out the wider
+/// timeline. `ScrollViewReader` aligns dynamic background markers unreliably
+/// on macOS, so cursor-anchored zoom uses the underlying scroll view directly.
+private struct TimelineZoomScrollController: NSViewRepresentable {
+  let coordinator: TimelineScrollCoordinator
+  let request: TimelineZoomScrollRequest?
+  let contentWidth: CGFloat
+  let viewportWidth: CGFloat
+
+  func makeNSView(context: Context) -> TimelineZoomScrollControllerNSView {
+    TimelineZoomScrollControllerNSView()
+  }
+
+  func updateNSView(
+    _ nsView: TimelineZoomScrollControllerNSView,
+    context: Context
+  ) {
+    nsView.schedule(
+      coordinator: coordinator,
+      request: request,
+      contentWidth: contentWidth,
+      viewportWidth: viewportWidth
+    )
+  }
+}
+
+final class TimelineZoomScrollControllerNSView: NSView {
+  private weak var coordinator: TimelineScrollCoordinator?
+  private var appliedRequestID: UUID?
+  private var latestContentWidth: CGFloat = 0
+  private var latestViewportWidth: CGFloat = 0
+  private var pendingRequest: (
+    request: TimelineZoomScrollRequest,
+    contentWidth: CGFloat,
+    viewportWidth: CGFloat
+  )?
+
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    nil
+  }
+
+  func schedule(
+    coordinator: TimelineScrollCoordinator,
+    request: TimelineZoomScrollRequest?,
+    contentWidth: CGFloat,
+    viewportWidth: CGFloat
+  ) {
+    self.coordinator = coordinator
+    latestContentWidth = contentWidth
+    latestViewportWidth = viewportWidth
+    if let request, request.id != appliedRequestID {
+      pendingRequest = (request, contentWidth, viewportWidth)
+    }
+    if let scrollView = enclosingScrollView {
+      coordinator.attach(
+        to: scrollView,
+        contentWidth: contentWidth,
+        viewportWidth: viewportWidth
+      )
+    }
+    // Apply during the same SwiftUI update whenever the document already has
+    // its new width. This prevents the enlarged content from being displayed
+    // for one frame before the anchor correction.
+    applyPendingRequest()
+    guard pendingRequest != nil else { return }
+    DispatchQueue.main.async { [weak self] in
+      self?.applyPendingRequest()
+    }
+  }
+
+  private func applyPendingRequest() {
+    guard let coordinator, let scrollView = enclosingScrollView else { return }
+    let metrics = pendingRequest.map {
+      ($0.contentWidth, $0.viewportWidth)
+    } ?? (latestContentWidth, latestViewportWidth)
+    coordinator.attach(
+      to: scrollView,
+      contentWidth: metrics.0,
+      viewportWidth: metrics.1
+    )
+    guard let pendingRequest else { return }
+    let didApply = coordinator.apply(
+      request: pendingRequest.request,
+      contentWidth: pendingRequest.contentWidth,
+      viewportWidth: pendingRequest.viewportWidth
+    )
+    guard didApply else { return }
+    appliedRequestID = pendingRequest.request.id
+    self.pendingRequest = nil
   }
 }
 
@@ -1454,7 +1776,7 @@ private struct TimelinePointerTrackingView: NSViewRepresentable {
   }
 }
 
-private final class TimelinePointerTrackingNSView: NSView {
+final class TimelinePointerTrackingNSView: NSView {
   var onMoved: ((CGFloat) -> Void)?
   var onExited: (() -> Void)?
   private var pointerTrackingArea: NSTrackingArea?
@@ -1491,7 +1813,11 @@ private final class TimelinePointerTrackingNSView: NSView {
   }
 
   override func mouseExited(with event: NSEvent) {
-    reportPointerExit()
+    // Removing/replacing tracking areas during a split, zoom, or reorder can
+    // deliver a stale exit after the replacement is already under the mouse.
+    // Reconcile with the real pointer position instead of clearing the
+    // skimmer from the stale event.
+    refreshPointerLocation()
   }
 
   override func hitTest(_ point: NSPoint) -> NSView? {
@@ -1539,11 +1865,15 @@ private final class TimelinePointerTrackingNSView: NSView {
 /// one instance with two fresh instances, so the new edges work immediately
 /// without waiting for SwiftUI to rebuild hover state.
 private struct TimelineTrimHandleView: NSViewRepresentable {
+  let edge: TrimEdge
+  let onHoverChanged: (Bool) -> Void
   let onDragChanged: (CGFloat) -> Void
   let onDragEnded: (CGFloat) -> Void
 
   func makeNSView(context: Context) -> TimelineTrimHandleNSView {
     let view = TimelineTrimHandleNSView()
+    view.edge = edge
+    view.onHoverChanged = onHoverChanged
     view.onDragChanged = onDragChanged
     view.onDragEnded = onDragEnded
     return view
@@ -1553,37 +1883,55 @@ private struct TimelineTrimHandleView: NSViewRepresentable {
     _ nsView: TimelineTrimHandleNSView,
     context: Context
   ) {
+    nsView.edge = edge
+    nsView.onHoverChanged = onHoverChanged
     nsView.onDragChanged = onDragChanged
     nsView.onDragEnded = onDragEnded
-    nsView.window?.invalidateCursorRects(for: nsView)
   }
 }
 
-private final class TimelineTrimHandleNSView: NSView {
+final class TimelineTrimHandleNSView: NSView {
+  var edge: TrimEdge = .leading
+  var onHoverChanged: ((Bool) -> Void)?
   var onDragChanged: ((CGFloat) -> Void)?
   var onDragEnded: ((CGFloat) -> Void)?
   private var dragStartX: CGFloat?
   private var cursorTrackingArea: NSTrackingArea?
+  private var pointerEventMonitor: Any?
+  private var isHovering = false
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    updatePointerEventMonitor()
+    window?.invalidateCursorRects(for: self)
+    refreshHoverState()
+  }
+
+  override func setFrameSize(_ newSize: NSSize) {
+    super.setFrameSize(newSize)
+    window?.invalidateCursorRects(for: self)
+  }
 
   override func updateTrackingAreas() {
     super.updateTrackingAreas()
     if let cursorTrackingArea {
       removeTrackingArea(cursorTrackingArea)
     }
-    let trackingArea = NSTrackingArea(
+    let area = NSTrackingArea(
       rect: .zero,
       options: [
         .mouseEnteredAndExited,
         .mouseMoved,
+        .cursorUpdate,
         .activeInKeyWindow,
         .inVisibleRect,
       ],
       owner: self,
       userInfo: nil
     )
-    addTrackingArea(trackingArea)
-    cursorTrackingArea = trackingArea
-    refreshCursor()
+    addTrackingArea(area)
+    cursorTrackingArea = area
+    refreshHoverState()
   }
 
   override func resetCursorRects() {
@@ -1592,23 +1940,35 @@ private final class TimelineTrimHandleNSView: NSView {
   }
 
   override func mouseEntered(with event: NSEvent) {
-    NSCursor.resizeLeftRight.set()
+    setHovering(true)
   }
 
   override func mouseMoved(with event: NSEvent) {
-    NSCursor.resizeLeftRight.set()
+    setHovering(true)
+  }
+
+  override func cursorUpdate(with event: NSEvent) {
+    setHovering(true)
   }
 
   override func mouseExited(with event: NSEvent) {
-    NSCursor.arrow.set()
+    // SwiftUI can replace or resize a representable while the pointer is
+    // stationary. Resolve the real pointer position after that update instead
+    // of immediately flashing the arrow cursor.
+    DispatchQueue.main.async { [weak self] in
+      self?.refreshHoverState()
+    }
   }
 
   override func mouseDown(with event: NSEvent) {
     dragStartX = event.locationInWindow.x
+    setHovering(true)
   }
 
   override func mouseDragged(with event: NSEvent) {
     guard let dragStartX else { return }
+    // Keep the resize cursor while dragging outside the narrow hit region.
+    NSCursor.resizeLeftRight.set()
     onDragChanged?(event.locationInWindow.x - dragStartX)
   }
 
@@ -1616,15 +1976,68 @@ private final class TimelineTrimHandleNSView: NSView {
     guard let dragStartX else { return }
     self.dragStartX = nil
     onDragEnded?(event.locationInWindow.x - dragStartX)
-    refreshCursor()
+    window?.invalidateCursorRects(for: self)
+    refreshHoverState()
   }
 
-  private func refreshCursor() {
-    guard let window else { return }
-    let location = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-    if bounds.contains(location) {
+  func setHovering(_ hovering: Bool) {
+    if hovering {
       NSCursor.resizeLeftRight.set()
     }
+    guard isHovering != hovering else { return }
+    isHovering = hovering
+    onHoverChanged?(hovering)
+  }
+
+  private func refreshHoverState() {
+    guard let window else {
+      setHovering(false)
+      return
+    }
+    let location = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+    let hovering = bounds.contains(location)
+    setHovering(hovering)
+    if !hovering {
+      // Let AppKit choose the cursor from the complete cursor-rect stack.
+      // Setting `.arrow` here lets a stale exit from the opposite edge
+      // overwrite the resize cursor that has just entered this handle.
+      window.invalidateCursorRects(for: self)
+    }
+  }
+
+  /// Cursor rectangles from the enclosing SwiftUI scroll view can be resolved
+  /// after this view's tracking callback, especially at the trailing edge of
+  /// the last clip. Reconcile once more at the end of every pointer event so
+  /// the deepest view under the pointer wins deterministically.
+  private func updatePointerEventMonitor() {
+    if let pointerEventMonitor {
+      NSEvent.removeMonitor(pointerEventMonitor)
+      self.pointerEventMonitor = nil
+    }
+    guard window != nil else { return }
+    pointerEventMonitor = NSEvent.addLocalMonitorForEvents(
+      matching: [.mouseMoved, .leftMouseDragged]
+    ) { [weak self] event in
+      guard let self, event.window === self.window else { return event }
+      let localLocation = self.convert(event.locationInWindow, from: nil)
+      // Every trim handle receives the window-level monitor event. Scheduling
+      // refreshes for handles that are not under the pointer invalidates their
+      // cursor rectangles and makes the active handle visibly flicker between
+      // arrow and resize. Only the single matching handle may reassert.
+      guard self.bounds.contains(localLocation) else { return event }
+      DispatchQueue.main.async { [weak self] in
+        guard let self, self.dragStartX != nil || self.isPointerActuallyInside
+        else { return }
+        self.setHovering(true)
+      }
+      return event
+    }
+  }
+
+  private var isPointerActuallyInside: Bool {
+    guard let window else { return false }
+    let location = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+    return bounds.contains(location)
   }
 }
 
@@ -1644,14 +2057,6 @@ private struct TimelineClipLayout: Identifiable {
   }
 }
 
-private struct TimelineContentMinXPreferenceKey: PreferenceKey {
-  static let defaultValue: CGFloat = 0
-
-  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-    value = nextValue()
-  }
-}
-
 private struct PlaybackTimestampLabel: View {
   @ObservedObject var playback: PlaybackState
 
@@ -1665,8 +2070,6 @@ private struct TimelineGlobalPlayhead: View {
   @ObservedObject var playback: PlaybackState
   let duration: Double
   let contentWidth: CGFloat
-  let hoveredX: CGFloat?
-  let snapDistance: CGFloat
 
   var body: some View {
     let playbackX = duration > 0
@@ -1675,12 +2078,6 @@ private struct TimelineGlobalPlayhead: View {
     let anchoredX = duration > 0
       ? contentWidth * playback.anchoredPlayhead / duration
       : 0
-    let isSnapped = !playback.isPlaying
-      && hoveredX.map { abs($0 - anchoredX) <= snapDistance } == true
-    let skimmerX = hoveredX.map {
-      isSnapped ? anchoredX : $0
-    }
-    let activeX = playback.isPlaying ? playbackX : skimmerX
     GeometryReader { proxy in
       ZStack(alignment: .topLeading) {
         if !playback.isPlaying {
@@ -1689,21 +2086,18 @@ private struct TimelineGlobalPlayhead: View {
             .frame(width: 1, height: proxy.size.height)
             .offset(x: min(max(0, anchoredX - 0.5), contentWidth - 1))
         }
-        if let activeX {
-          let activeColor = isSnapped
-            ? Color.yellow
-            : Color.white.opacity(0.96)
+        if playback.isPlaying {
           Rectangle()
-            .fill(activeColor)
+            .fill(Color.white.opacity(0.96))
             .frame(width: 1.5, height: proxy.size.height)
-            .offset(x: min(max(0, activeX - 0.75), contentWidth - 1.5))
+            .offset(x: min(max(0, playbackX - 0.75), contentWidth - 1.5))
             .shadow(color: .black.opacity(0.7), radius: 1)
           Image(systemName: "arrowtriangle.down.fill")
             .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(activeColor)
+            .foregroundStyle(Color.white.opacity(0.96))
             .shadow(color: .black.opacity(0.75), radius: 1)
             .offset(
-              x: min(max(0, activeX - 4.5), contentWidth - 9),
+              x: min(max(0, playbackX - 4.5), contentWidth - 9),
               y: 1
             )
         }
@@ -1713,6 +2107,44 @@ private struct TimelineGlobalPlayhead: View {
         height: proxy.size.height,
         alignment: .topLeading
       )
+      .allowsHitTesting(false)
+      .accessibilityHidden(true)
+    }
+  }
+}
+
+private struct TimelineViewportSkimmer: View {
+  let viewportX: CGFloat
+  let anchoredViewportX: CGFloat?
+  let snapDistance: CGFloat
+
+  var body: some View {
+    GeometryReader { proxy in
+      let geometry = TimelineInteractionGeometry.viewportSkimmer(
+        pointerViewportX: viewportX,
+        anchoredViewportX: anchoredViewportX,
+        viewportWidth: proxy.size.width,
+        snapDistance: snapDistance
+      )
+      let x = geometry.x
+      let color = geometry.isSnapped
+        ? Color.yellow
+        : Color.white.opacity(0.96)
+      ZStack(alignment: .topLeading) {
+        Rectangle()
+          .fill(color)
+          .frame(width: 1.5, height: proxy.size.height)
+          .offset(x: min(max(0, x - 0.75), max(0, proxy.size.width - 1.5)))
+          .shadow(color: .black.opacity(0.7), radius: 1)
+        Image(systemName: "arrowtriangle.down.fill")
+          .font(.system(size: 9, weight: .bold))
+          .foregroundStyle(color)
+          .shadow(color: .black.opacity(0.75), radius: 1)
+          .offset(
+            x: min(max(0, x - 4.5), max(0, proxy.size.width - 9)),
+            y: 1
+          )
+      }
       .allowsHitTesting(false)
       .accessibilityHidden(true)
     }
@@ -1736,7 +2168,7 @@ private struct ClipThumbnailStrip: View {
     GeometryReader { proxy in
       if images.isEmpty {
         ZStack {
-          Color.accentColor.opacity(0.48)
+          EditorTheme.accent.opacity(0.48)
           Image(systemName: "film")
             .font(.title3)
             .foregroundStyle(.white.opacity(0.58))
@@ -1746,7 +2178,7 @@ private struct ClipThumbnailStrip: View {
           ForEach(Array(images.enumerated()), id: \.offset) { _, image in
             Image(decorative: image, scale: 1)
               .resizable()
-              .scaledToFit()
+              .scaledToFill()
               .frame(
                 width: max(
                   1,

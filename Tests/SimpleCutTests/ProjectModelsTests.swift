@@ -13,6 +13,71 @@ final class ProjectModelsTests: XCTestCase {
   }
 
   func testTimelineInteractionMapsAndClampsTheWholeTrack() {
+    let regularInteractionWidth =
+      TimelineInteractionGeometry.trimInteractionWidth(
+        cardWidth: 100,
+        exteriorInset: 5
+      )
+    let regularHandleWidth = TimelineInteractionGeometry.trimHandleWidth(
+      cardWidth: 100,
+      preferredWidth: 12,
+      exteriorInset: 5
+    )
+    XCTAssertEqual(regularInteractionWidth, 110)
+    XCTAssertGreaterThanOrEqual(
+      regularInteractionWidth,
+      regularHandleWidth * 2
+    )
+
+    let shortInteractionWidth = TimelineInteractionGeometry.trimInteractionWidth(
+      cardWidth: 10,
+      exteriorInset: 5
+    )
+    let shortHandleWidth = TimelineInteractionGeometry.trimHandleWidth(
+      cardWidth: 10,
+      preferredWidth: 12,
+      exteriorInset: 5
+    )
+    XCTAssertEqual(shortInteractionWidth, shortHandleWidth * 2)
+
+    let productionHandleWidth = TimelineInteractionGeometry.trimHandleWidth(
+      cardWidth: 100,
+      preferredWidth: 16,
+      exteriorInset: 5
+    )
+    let visualLeadingEdge: CGFloat = 5
+    let visualTrailingEdge: CGFloat = 105
+    let trailingHandleOrigin = regularInteractionWidth - productionHandleWidth
+    XCTAssertTrue((0...productionHandleWidth).contains(visualLeadingEdge))
+    XCTAssertTrue(
+      (trailingHandleOrigin...regularInteractionWidth)
+        .contains(visualTrailingEdge)
+    )
+
+    XCTAssertEqual(
+      TimelineInteractionGeometry.trimHandleWidth(
+        cardWidth: 100,
+        preferredWidth: 12,
+        exteriorInset: 5
+      ),
+      17
+    )
+    XCTAssertEqual(
+      TimelineInteractionGeometry.trimHandleWidth(
+        cardWidth: 10,
+        preferredWidth: 12,
+        exteriorInset: 5
+      ),
+      10
+    )
+    XCTAssertEqual(
+      TimelineInteractionGeometry.trimHandleWidth(
+        cardWidth: -4,
+        preferredWidth: 12,
+        exteriorInset: 5
+      ),
+      5
+    )
     XCTAssertEqual(
       TimelineInteractionGeometry.contentX(
         viewportX: 140,
@@ -39,6 +104,89 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertEqual(
       TimelineInteractionGeometry.snappedX(102, targetX: 110, threshold: 7),
       102
+    )
+    XCTAssertEqual(
+      TimelineInteractionGeometry.viewportSkimmer(
+        pointerViewportX: 103,
+        anchoredViewportX: 110,
+        viewportWidth: 400,
+        snapDistance: 7
+      ),
+      TimelineViewportSkimmerGeometry(x: 110, isSnapped: true)
+    )
+    XCTAssertEqual(
+      TimelineInteractionGeometry.viewportSkimmer(
+        pointerViewportX: 102.9,
+        anchoredViewportX: 110,
+        viewportWidth: 400,
+        snapDistance: 7
+      ),
+      TimelineViewportSkimmerGeometry(x: 102.9, isSnapped: false)
+    )
+    XCTAssertEqual(
+      TimelineInteractionGeometry.viewportSkimmer(
+        pointerViewportX: 0,
+        anchoredViewportX: -2,
+        viewportWidth: 400,
+        snapDistance: 7
+      ),
+      TimelineViewportSkimmerGeometry(x: 0, isSnapped: false)
+    )
+  }
+
+  func testTimelineZoomUsesPointerThenPlayheadThenViewportCenter() {
+    XCTAssertEqual(
+      TimelineInteractionGeometry.zoomAnchor(
+        contentWidth: 1_000,
+        viewportWidth: 400,
+        contentMinX: -300,
+        pointerViewportX: 100,
+        playheadProgress: 0.8
+      ),
+      TimelineZoomAnchorGeometry(
+        contentProgress: 0.4,
+        viewportProgress: 0.25
+      )
+    )
+
+    XCTAssertEqual(
+      TimelineInteractionGeometry.zoomAnchor(
+        contentWidth: 1_000,
+        viewportWidth: 400,
+        contentMinX: -300,
+        pointerViewportX: nil,
+        playheadProgress: 0.5
+      ),
+      TimelineZoomAnchorGeometry(
+        contentProgress: 0.5,
+        viewportProgress: 0.5
+      )
+    )
+
+    XCTAssertEqual(
+      TimelineInteractionGeometry.zoomAnchor(
+        contentWidth: 1_000,
+        viewportWidth: 400,
+        contentMinX: -500,
+        pointerViewportX: nil,
+        playheadProgress: 0.95
+      ),
+      TimelineZoomAnchorGeometry(
+        contentProgress: 0.7,
+        viewportProgress: 0.5
+      )
+    )
+
+    XCTAssertEqual(
+      TimelineInteractionGeometry.zoomScrollOffset(
+        anchor: TimelineZoomAnchorGeometry(
+          contentProgress: 0.4,
+          viewportProgress: 0.25
+        ),
+        contentWidth: 2_000,
+        viewportWidth: 400
+      ),
+      700
     )
   }
 
@@ -237,6 +385,48 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertEqual(preview.offset, 80)
     XCTAssertEqual(preview.width, -80)
     XCTAssertEqual(preview.offset + preview.width, 0)
+    let thumbnailOffset = TimelineInteractionGeometry.thumbnailOffset(
+      for: .leading,
+      adjustment: preview
+    )
+    XCTAssertEqual(thumbnailOffset, -80)
+    XCTAssertEqual(preview.offset + thumbnailOffset, 0)
+
+    let restoredPreview = TrimPreviewGeometry.adjustment(
+      for: clip,
+      edge: .leading,
+      translation: -80,
+      pixelsPerSecond: 100
+    )
+    let restoredThumbnailOffset = TimelineInteractionGeometry.thumbnailOffset(
+      for: .leading,
+      adjustment: restoredPreview
+    )
+    XCTAssertEqual(restoredPreview.offset + restoredThumbnailOffset, 0)
+  }
+
+  func testTrailingTrimKeepsThumbnailOriginPinned() {
+    let clip = VideoClip(
+      sourceURL: URL(fileURLWithPath: "/tmp/trailing-trim-preview.mov"),
+      sourceStart: 2,
+      duration: 4,
+      sourceDuration: 10
+    )
+    let preview = TrimPreviewGeometry.adjustment(
+      for: clip,
+      edge: .trailing,
+      translation: 80,
+      pixelsPerSecond: 100
+    )
+
+    XCTAssertEqual(preview.offset, 0)
+    XCTAssertEqual(
+      TimelineInteractionGeometry.thumbnailOffset(
+        for: .trailing,
+        adjustment: preview
+      ),
+      0
+    )
   }
 
   @MainActor
@@ -1148,6 +1338,74 @@ final class ProjectModelsTests: XCTestCase {
     XCTAssertEqual(project.overlays[0].normalizedWidth, 0.73)
     XCTAssertEqual(project.overlays[0].textAlignment, .right)
     XCTAssertTrue(project.canDeleteSavedStyle(for: overlayID))
+  }
+
+  @MainActor
+  func testLastTextStyleIsUsedAutomaticallyByANewProject() {
+    let defaults = isolatedCaptionStyleDefaults()
+    let firstProject = EditorProject(
+      loadRecovery: false,
+      captionStyleDefaults: defaults
+    )
+    firstProject.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 5
+      )
+    ]
+    firstProject.addText()
+    let firstID = try! XCTUnwrap(firstProject.overlays.first?.id)
+    firstProject.overlays[0].fontName = "Georgia"
+    firstProject.overlays[0].fontSize = 91
+    firstProject.overlays[0].backgroundEnabled = false
+    firstProject.overlays[0].rotation = 7
+    firstProject.overlays[0].opacity = 0.72
+    firstProject.rememberStyle(for: firstID)
+
+    let secondProject = EditorProject(
+      loadRecovery: false,
+      captionStyleDefaults: defaults
+    )
+    secondProject.clips = firstProject.clips
+    secondProject.addText()
+
+    let text = try! XCTUnwrap(secondProject.overlays.first)
+    XCTAssertEqual(text.fontName, "Georgia")
+    XCTAssertEqual(text.fontSize, 91)
+    XCTAssertFalse(text.backgroundEnabled)
+    XCTAssertEqual(text.rotation, 7)
+    XCTAssertEqual(text.opacity, 0.72)
+  }
+
+  @MainActor
+  func testResetTextStyleBecomesDefaultForFutureProjects() {
+    let defaults = isolatedCaptionStyleDefaults()
+    let project = EditorProject(
+      loadRecovery: false,
+      captionStyleDefaults: defaults
+    )
+    project.clips = [
+      VideoClip(
+        sourceURL: URL(fileURLWithPath: "/tmp/source.mov"),
+        sourceStart: 0,
+        duration: 5
+      )
+    ]
+    project.addText()
+    let textID = try! XCTUnwrap(project.overlays.first?.id)
+    project.overlays[0].fontSize = 112
+    project.rememberStyle(for: textID)
+    project.resetStyle(for: textID)
+
+    XCTAssertEqual(
+      CaptionStyle(item: project.overlays[0]),
+      CaptionStyle.defaultStyle(for: .text)
+    )
+    XCTAssertEqual(
+      CaptionStyleStore.activeStyle(for: .text, in: defaults),
+      CaptionStyle.defaultStyle(for: .text)
+    )
   }
 
   @MainActor

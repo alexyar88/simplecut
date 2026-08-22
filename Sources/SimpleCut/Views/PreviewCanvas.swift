@@ -275,6 +275,7 @@ struct PreviewCanvas: View {
         }
       }
       .onEnded { _ in
+        project.rememberStyle(for: item.id)
         draggingOverlayID = nil
         NSCursor.openHand.set()
       }
@@ -340,6 +341,7 @@ struct PreviewCanvas: View {
             }
           }
           .onEnded { _ in
+            project.rememberStyle(for: item.id)
             resizingOverlayID = nil
             resizeStartWidth = nil
             resizeStartX = nil

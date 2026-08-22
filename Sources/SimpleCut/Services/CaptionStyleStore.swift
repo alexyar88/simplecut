@@ -10,13 +10,23 @@ struct NamedOverlayStyle: Codable, Equatable, Identifiable {
 enum CaptionStyleStore {
   private enum Key {
     static let active = "SimpleCut.captionStyle.active"
+    static let activeText = "SimpleCut.textStyle.active"
     static let custom = "SimpleCut.captionStyle.custom"
     static let captionStyles = "SimpleCut.captionStyle.named.caption"
     static let textStyles = "SimpleCut.captionStyle.named.text"
   }
 
   static func activeStyle(in defaults: UserDefaults = .standard) -> CaptionStyle {
-    decode(defaults.data(forKey: Key.active)) ?? .init()
+    activeStyle(for: .caption, in: defaults)
+  }
+
+  static func activeStyle(
+    for kind: OverlayKind,
+    in defaults: UserDefaults = .standard
+  ) -> CaptionStyle {
+    guard kind == .caption || kind == .text else { return .init() }
+    return decode(defaults.data(forKey: activeStyleKey(for: kind)))
+      ?? CaptionStyle.defaultStyle(for: kind)
   }
 
   static func customStyle(in defaults: UserDefaults = .standard) -> CaptionStyle? {
@@ -112,9 +122,11 @@ enum CaptionStyleStore {
 
   static func select(
     style: CaptionStyle,
+    for kind: OverlayKind = .caption,
     in defaults: UserDefaults = .standard
   ) {
-    store(style, forKey: Key.active, in: defaults)
+    guard kind == .caption || kind == .text else { return }
+    store(style, forKey: activeStyleKey(for: kind), in: defaults)
   }
 
   static func saveCustom(
@@ -139,6 +151,10 @@ enum CaptionStyleStore {
 
   private static func namedStylesKey(for kind: OverlayKind) -> String {
     kind == .text ? Key.textStyles : Key.captionStyles
+  }
+
+  private static func activeStyleKey(for kind: OverlayKind) -> String {
+    kind == .text ? Key.activeText : Key.active
   }
 
   private static func storeNamedStyles(

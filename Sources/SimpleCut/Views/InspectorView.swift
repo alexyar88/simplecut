@@ -336,12 +336,25 @@ struct InspectorView: View {
           recordsCheckpoint: true
         )
         Toggle("Подложка", isOn: backgroundEnabled)
-        ColorPicker(
-          "Цвет подложки",
-          selection: captionColorBinding(\.backgroundHex),
-          supportsOpacity: true
-        )
-        .disabled(!backgroundEnabled.wrappedValue)
+        if backgroundEnabled.wrappedValue {
+          ColorPicker(
+            "Цвет подложки",
+            selection: captionColorBinding(\.backgroundHex),
+            supportsOpacity: true
+          )
+          inspectorSlider(
+            "Отступы",
+            value: captionBinding(\.textPadding, fallback: 12),
+            range: 0...40,
+            suffix: " pt"
+          )
+          inspectorSlider(
+            "Скругление",
+            value: captionBinding(\.cornerRadius, fallback: 8),
+            range: 0...32,
+            suffix: " pt"
+          )
+        }
         ColorPicker(
           "Цвет обводки",
           selection: captionColorBinding(\.strokeHex),
@@ -353,20 +366,6 @@ struct InspectorView: View {
           range: 0...12,
           suffix: " pt"
         )
-        inspectorSlider(
-          "Отступы",
-          value: captionBinding(\.textPadding, fallback: 12),
-          range: 0...40,
-          suffix: " pt"
-        )
-        .disabled(!backgroundEnabled.wrappedValue)
-        inspectorSlider(
-          "Скругление",
-          value: captionBinding(\.cornerRadius, fallback: 8),
-          range: 0...32,
-          suffix: " pt"
-        )
-        .disabled(!backgroundEnabled.wrappedValue)
         inspectorSlider(
           "Ширина",
           value: captionBinding(\.normalizedWidth, fallback: 0.82),
@@ -477,14 +476,15 @@ struct InspectorView: View {
         )
         inspectorSlider(
           "Размер шрифта",
-          value: $project.overlays[index].fontSize,
+          value: overlayBinding(index: index, keyPath: \.fontSize),
           range: 20...160,
           suffix: " pt"
         )
         ColorPicker(
           "Цвет текста",
-          selection: colorBinding(
-            hex: $project.overlays[index].foregroundHex
+          selection: overlayColorBinding(
+            index: index,
+            keyPath: \.foregroundHex
           ),
           supportsOpacity: true
         )
@@ -493,41 +493,42 @@ struct InspectorView: View {
           keyPath: \.backgroundEnabled
         )
         Toggle("Подложка", isOn: backgroundEnabled)
-        ColorPicker(
-          "Цвет подложки",
-          selection: colorBinding(
-            hex: $project.overlays[index].backgroundHex
-          ),
-          supportsOpacity: true
-        )
-        .disabled(!backgroundEnabled.wrappedValue)
+        if backgroundEnabled.wrappedValue {
+          ColorPicker(
+            "Цвет подложки",
+            selection: overlayColorBinding(
+              index: index,
+              keyPath: \.backgroundHex
+            ),
+            supportsOpacity: true
+          )
+          inspectorSlider(
+            "Отступы",
+            value: overlayBinding(index: index, keyPath: \.textPadding),
+            range: 0...40,
+            suffix: " pt"
+          )
+          inspectorSlider(
+            "Скругление",
+            value: overlayBinding(index: index, keyPath: \.cornerRadius),
+            range: 0...32,
+            suffix: " pt"
+          )
+        }
         ColorPicker(
           "Цвет обводки",
-          selection: colorBinding(
-            hex: $project.overlays[index].strokeHex
+          selection: overlayColorBinding(
+            index: index,
+            keyPath: \.strokeHex
           ),
           supportsOpacity: true
         )
         inspectorSlider(
           "Толщина обводки",
-          value: $project.overlays[index].strokeWidth,
+          value: overlayBinding(index: index, keyPath: \.strokeWidth),
           range: 0...12,
           suffix: " pt"
         )
-        inspectorSlider(
-          "Отступы",
-          value: $project.overlays[index].textPadding,
-          range: 0...40,
-          suffix: " pt"
-        )
-        .disabled(!backgroundEnabled.wrappedValue)
-        inspectorSlider(
-          "Скругление",
-          value: $project.overlays[index].cornerRadius,
-          range: 0...32,
-          suffix: " pt"
-        )
-        .disabled(!backgroundEnabled.wrappedValue)
         transformControls(index: index, minimumWidth: 0.25)
         Divider()
         quickStyleMenu(kind: .text, overlayID: item.id)
@@ -653,21 +654,21 @@ struct InspectorView: View {
   ) -> some View {
     inspectorSlider(
       "Ширина",
-      value: $project.overlays[index].normalizedWidth,
+      value: overlayBinding(index: index, keyPath: \.normalizedWidth),
       range: minimumWidth...1,
       displayScale: 100,
       suffix: "%"
     )
     inspectorSlider(
       "Прозрачность",
-      value: $project.overlays[index].opacity,
+      value: overlayBinding(index: index, keyPath: \.opacity),
       range: 0...1,
       displayScale: 100,
       suffix: "%"
     )
     inspectorSlider(
       "Поворот",
-      value: $project.overlays[index].rotation,
+      value: overlayBinding(index: index, keyPath: \.rotation),
       range: -180...180,
       suffix: "°"
     )
@@ -686,19 +687,26 @@ struct InspectorView: View {
       currentName.map { name in
         project.styles(for: kind).contains { $0.name == name }
       } ?? false
-    return HStack(spacing: 8) {
-      Button("Сохранить стиль") {
-        beginSavingStyle(kind: kind, overlayID: overlayID)
+    return VStack(alignment: .leading, spacing: 8) {
+      HStack(spacing: 8) {
+        Button("Сохранить стиль") {
+          beginSavingStyle(kind: kind, overlayID: overlayID)
+        }
+        .buttonStyle(.bordered)
+        Button("Удалить стиль", role: .destructive) {
+          guard let currentName else { return }
+          project.deleteStyle(named: currentName, for: kind)
+          setCurrentStyleName(nil, for: kind)
+        }
+        .buttonStyle(.bordered)
+        .tint(.red)
+        .disabled(!canDelete)
       }
-      .buttonStyle(.bordered)
-      Button("Удалить стиль", role: .destructive) {
-        guard let currentName else { return }
-        project.deleteStyle(named: currentName, for: kind)
+      Button("Сбросить оформление") {
+        project.resetStyle(for: overlayID)
         setCurrentStyleName(nil, for: kind)
       }
       .buttonStyle(.bordered)
-      .tint(.red)
-      .disabled(!canDelete)
     }
   }
 
@@ -753,6 +761,7 @@ struct InspectorView: View {
         }
         project.recordUndoCheckpoint()
         project.overlays[index][keyPath: keyPath] = newValue
+        project.rememberStyle(for: project.overlays[index].id)
       }
     )
   }
@@ -845,6 +854,7 @@ struct InspectorView: View {
         for index in indices {
           project.overlays[index][keyPath: keyPath] = value
         }
+        project.rememberStyle(for: .caption)
       }
     )
   }
@@ -880,14 +890,20 @@ struct InspectorView: View {
     }
   }
 
-  private func colorBinding(hex: Binding<String>) -> Binding<Color> {
+  private func overlayColorBinding(
+    index: Int,
+    keyPath: WritableKeyPath<OverlayItem, String>
+  ) -> Binding<Color> {
     Binding(
-      get: { Color(nsColor: NSColor(hex: hex.wrappedValue)) },
+      get: {
+        Color(nsColor: NSColor(
+          hex: project.overlays[index][keyPath: keyPath]
+        ))
+      },
       set: { color in
         let value = NSColor(color).simpleCutHex
-        guard value != hex.wrappedValue else { return }
-        project.recordUndoCheckpoint()
-        hex.wrappedValue = value
+        let binding = overlayBinding(index: index, keyPath: keyPath)
+        binding.wrappedValue = value
       }
     )
   }

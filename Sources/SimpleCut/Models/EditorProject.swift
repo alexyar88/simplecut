@@ -344,12 +344,14 @@ final class EditorProject: ObservableObject {
     guard duration > 0 else { return }
     recordUndoCheckpoint()
     let placement = newOverlayPlacement(preferredDuration: 5)
-    let item = OverlayItem(
+    var item = OverlayItem(
       kind: .text,
       startTime: placement.start,
       duration: placement.duration,
       text: "Ваш текст"
     )
+    CaptionStyleStore.activeStyle(for: .text, in: captionStyleDefaults)
+      .apply(to: &item)
     overlays.append(item)
     clearClipSelection()
     selectedOverlayID = item.id
@@ -510,7 +512,10 @@ final class EditorProject: ObservableObject {
       overlays[index].normalizedX = source.normalizedX
       overlays[index].normalizedY = source.normalizedY
       overlays[index].normalizedWidth = source.normalizedWidth
+      overlays[index].rotation = source.rotation
+      overlays[index].opacity = source.opacity
     }
+    rememberStyle(for: source.id)
   }
 
   func setCaptionPosition(normalizedX: Double, normalizedY: Double) {
@@ -563,6 +568,30 @@ final class EditorProject: ObservableObject {
     applyStyle(preset.style, to: id)
   }
 
+  func rememberStyle(for id: UUID) {
+    guard let item = overlays.first(where: { $0.id == id }) else { return }
+    guard item.kind == .caption || item.kind == .text else { return }
+    CaptionStyleStore.select(
+      style: CaptionStyle(item: item),
+      for: item.kind,
+      in: captionStyleDefaults
+    )
+  }
+
+  func rememberStyle(for kind: OverlayKind) {
+    guard let item = overlays.first(where: { $0.kind == kind }) else { return }
+    rememberStyle(for: item.id)
+  }
+
+  func resetStyle(for id: UUID) {
+    guard let item = overlays.first(where: { $0.id == id }) else { return }
+    let style =
+      item.kind == .caption
+      ? CaptionStyle.defaultStyle(for: canvas)
+      : CaptionStyle.defaultStyle(for: item.kind)
+    applyStyle(style, to: id)
+  }
+
   func styles(for kind: OverlayKind) -> [NamedOverlayStyle] {
     kind == .caption ? savedCaptionStyles : savedTextStyles
   }
@@ -575,12 +604,11 @@ final class EditorProject: ObservableObject {
       })?.style
     else { return }
     applyStyle(style, to: id)
-    if item.kind == .caption {
-      CaptionStyleStore.select(
-        style: style,
-        in: captionStyleDefaults
-      )
-    }
+    CaptionStyleStore.select(
+      style: style,
+      for: item.kind,
+      in: captionStyleDefaults
+    )
   }
 
   func applySavedStyle(to id: UUID) {
@@ -604,12 +632,11 @@ final class EditorProject: ObservableObject {
       for: item.kind,
       in: captionStyleDefaults
     )
-    if item.kind == .caption {
-      CaptionStyleStore.select(
-        style: style,
-        in: captionStyleDefaults
-      )
-    }
+    CaptionStyleStore.select(
+      style: style,
+      for: item.kind,
+      in: captionStyleDefaults
+    )
     refreshSavedStyles()
   }
 
@@ -670,6 +697,7 @@ final class EditorProject: ObservableObject {
     for index in indices {
       style.apply(to: &overlays[index])
     }
+    rememberStyle(for: id)
   }
 
   func deleteSelectedOverlay() {
